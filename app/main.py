@@ -146,7 +146,33 @@ def get_rejections(
     return {"total": total_count, "page": page, "items": rows}
 
 @app.post("/search")
-def search_data(filters: dict = Body(...)):
+def search_data(filters: dict = Body(
+        ...,
+        openapi_examples={
+            "exact_video_3_match": {
+                "summary": "Sample: Find Video ID 3 Exactly",
+                "description": "Uses a mix of direct matches and sandwich ranges.",
+                "value": {
+                    "video_id_min": 3,
+                    "video_id_max": 3,
+                    "weather": "sunny",
+                    "time_of_day": "night",
+                    "road_surface": "dry",
+                    "headlights_on": 1,
+                    "wiper_on": 1,
+                    "wiper_level_min": 3,
+                    "wiper_level_max": 3,
+                    "temperature_fahrenheit_min": 58.2,
+                    "temperature_fahrenheit_max": 58.2,
+                    "label_car_min": 31,
+                    "label_car_max": 31,
+                    "label_pedestrian_min": 26,
+                    "label_traffic_sign_min": 11
+                }
+            }
+        }
+    )
+):
     if not os.path.exists(DB_PATH):
         raise HTTPException(status_code=503, detail="DB not initialized.")
 
@@ -154,31 +180,83 @@ def search_data(filters: dict = Body(...)):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
+    # Start with a base query
     query = "SELECT * FROM integrated_data WHERE 1=1"
     params = []
 
-    for col in ["weather", "time_of_day", "road_surface"]:
-        if col in filters and filters[col]:
-            vals = [v.strip() for v in str(filters[col]).split(",")]
-            query += f" AND {col} IN ({', '.join(['?']*len(vals))})"
-            params.extend(vals)
+    # --- 1. DIRECT MATCHES (Categorical & Booleans) ---
+    # These use exact '=' logic. No _min/_max needed.
+    direct_cols = ["weather", "time_of_day", "road_surface", "headlights_on", "wiper_on"]
+    
+    for col in direct_cols:
+        if col in filters and filters[col] is not None and filters[col] != "":
+            val = filters[col]
+            # Support comma-separated categories (e.g. "sunny, rainy")
+            if isinstance(val, str) and "," in val:
+                vals = [v.strip() for v in val.split(",")]
+                query += f" AND {col} IN ({', '.join(['?']*len(vals))})"
+                params.extend(vals)
+            else:
+                # Direct match for single strings or booleans (0/1)
+                query += f" AND {col} = ?"
+                params.append(val)
+
+    # --- 2. NUMERIC RANGE "SANDWICH" FILTERS ---
+    # These support _min and _max suffixes for range or exact matching.
+    range_fields = [
+        "video_id", 
+        "temperature_fahrenheit", 
+        "temperature_celsius", 
+        "wiper_level", 
+        "recorded_at"
+    ]
 
     for key, val in filters.items():
-        if key.startswith("label_") and key.endswith("_min"):
-            obj = key.replace("label_", "").replace("_min", "")
-            query += f" AND label_{obj}_count >= ?"
-            params.append(int(val))
+        if val is None or val == "": 
+            continue
+        
+        target_col = None
+        
+        # A. Handle Label Counts (e.g., label_car_min -> label_car_count)
+        if key.startswith("label_"):
+            obj = key.replace("label_", "").replace("_min", "").replace("_max", "")
+            target_col = f"label_{obj}_count"
+        
+        # B. Handle Standard Numeric/Date Fields (e.g., video_id_min -> video_id)
+        else:
+            for field in range_fields:
+                if key.startswith(field):
+                    target_col = field
+                    break
+        
+        # C. Construct the SQL based on the suffix detected
+        if target_col:
+            if key.endswith("_min"):
+                query += f" AND {target_col} >= ?"
+                params.append(val)
+            elif key.endswith("_max"):
+                query += f" AND {target_col} <= ?"
+                params.append(val)
 
-    if "temperature_fahrenheit_min" in filters:
-        query += " AND temperature_fahrenheit >= ?"; params.append(float(filters["temperature_fahrenheit_min"]))
+    # Execute and parse
+    try:
+        cursor.execute(query, params)
+        rows = [dict(row) for row in cursor.fetchall()]
+        
+        # Clean up labels for JSON response
+        for r in rows:
+            if r.get("labels"):
+                r["labels"] = json.loads(r["labels"])
 
-    cursor.execute(query, params)
-    rows = [dict(row) for row in cursor.fetchall()]
-    for r in rows:
-        if r.get("labels"): r["labels"] = json.loads(r["labels"])
+    except Exception as e:
+        conn.close()
+        raise HTTPException(status_code=500, detail=f"Search Error: {str(e)}")
 
     conn.close()
-    return {"total_found": len(rows), "results": rows[:100]}
+    return {
+        "total_found": len(rows), 
+        "results": rows[:100]  # Return first 100 results for performance
+    }
 
 @app.get("/joined_data")
 def get_joined_data():
