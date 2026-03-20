@@ -59,44 +59,59 @@ def merge_selections_with_odds(selections_df, odds_df) -> Tuple[pd.DataFrame, Li
     
     merged = pd.merge(selections_df, odds_df, on="video_id", how="inner")
     return merged, rejected_ids
-
 def merge_with_labels(merged_df, labels_df) -> Tuple[pd.DataFrame, Dict]:
-    labels_df["video_id"] = labels_df["video_id"].astype(int)
+    # --- STEP 1: AGGREGATE DUPLICATES (Handling your concern) ---
+    # video_id와 object_class가 같은 행이 여러 개일 경우 하나로 합칩니다.
+    # Count는 합산(sum), Confidence는 평균(mean)을 내는 것이 일반적입니다.
+    labels_df = labels_df.groupby(["video_id", "object_class"]).agg({
+        "obj_count": "sum",
+        "avg_confidence": "mean"
+    }).reset_index()
+
+    # --- STEP 2: NOISE DETECTION (Negative Counts) ---
+    negative_rows = labels_df[labels_df["obj_count"] < 0].copy()
+    invalid_vids = negative_rows["video_id"].unique()
     
-    # 1. 동적 플래트닝을 위한 준비: 모든 유니크한 객체 클래스 추출
-    all_classes = labels_df["object_class"].unique().tolist()
+    neg_reasons = negative_rows.groupby("video_id").apply(
+        lambda x: f"INVALID_NEGATIVE_COUNT: {', '.join(x['object_class'].unique())}",
+        include_groups=False
+    ).to_dict()
+
+    # --- STEP 3: CLEANING ---
+    clean_labels_df = labels_df[~labels_df["video_id"].isin(invalid_vids)].copy()
     
-    # 2. 피벗 테이블 생성 (video_id별 각 클래스의 count를 컬럼으로)
-    # fillna(0)를 통해 해당 비디오에 없는 객체는 0으로 처리
-    label_counts_pivot = labels_df.pivot_table(
+    # --- STEP 4: PIVOTING (Now safe from "Duplicate Entry" errors) ---
+    counts_pivot = clean_labels_df.pivot(
         index="video_id", 
         columns="object_class", 
-        values="obj_count", 
-        aggfunc="first"
+        values="obj_count"
     ).fillna(0).astype(int)
+    counts_pivot.columns = [f"label_{col}_count" for col in counts_pivot.columns]
     
-    # 컬럼명 명확화 (예: car -> label_car_count)
-    label_counts_pivot.columns = [f"label_{col}_count" for col in label_counts_pivot.columns]
-    label_counts_pivot = label_counts_pivot.reset_index()
-
-    # 3. 기존의 dict 구조(labels 컬럼)도 유지 (상세 정보용)
-    labels_dict_pivot = labels_df.groupby("video_id").apply(
+    # --- STEP 5: NESTED JSON CREATION ---
+    labels_pivot = clean_labels_df.groupby("video_id").apply(
         lambda x: {row.object_class: {"count": row.obj_count, "avg_confidence": row.avg_confidence} 
-                   for row in x.itertuples()}
+                   for row in x.itertuples()},
+        include_groups=False
     ).reset_index(name="labels")
     
-    # 4. 최종 병합 (Merged + Counts Pivot + Dict Pivot)
-    final_df = pd.merge(merged_df, labels_dict_pivot, on="video_id", how="inner")
-    final_df = pd.merge(final_df, label_counts_pivot, on="video_id", how="left")
+    # --- STEP 6: FINAL MERGE ---
+    final_df = merged_df.merge(labels_pivot, on="video_id", how="inner")
+    final_df = final_df.merge(counts_pivot.reset_index(), on="video_id", how="left")
     
-    # 병합 후 NaN이 된 카운트 컬럼들은 0으로 채움
+    # Fill any NaNs in the count columns
     count_cols = [c for c in final_df.columns if c.startswith("label_") and c.endswith("_count")]
     final_df[count_cols] = final_df[count_cols].fillna(0).astype(int)
 
-    stats = {"join_missing": sorted(set(merged_df["video_id"]) - set(labels_dict_pivot["video_id"]))}
+    # --- STEP 7: STATS FOR REJECTIONS ---
+    missing_ids = set(merged_df["video_id"]) - set(labels_pivot["video_id"])
+    stats = {
+        "missing_ids": list(missing_ids - set(invalid_vids)),
+        "negative_count_map": neg_reasons
+    }
     
-    # SQL 저장을 위해 dict 타입은 string으로 변환
-    final_df["labels"] = final_df["labels"].apply(lambda x: json.dumps(x) if isinstance(x, dict) else x)
+    # Vectorized JSON string conversion for SQL
+    final_df["labels"] = final_df["labels"].apply(json.dumps)
     
     return final_df, stats
 
