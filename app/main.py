@@ -1,9 +1,11 @@
+import sqlite3
+import os
+import json
 import pandas as pd
 from fastapi import FastAPI, Body, HTTPException
-from fastapi.responses import HTMLResponse
 from typing import Dict, List, Optional
 
-# Internal imports from your structured folders
+# 기존 로더 및 전처리 함수 임포트
 from app.ingestion.loader import load_all
 from app.preprocessing.preprocessing import (
     normalize_selections,
@@ -12,295 +14,178 @@ from app.preprocessing.preprocessing import (
     safe_json
 )
 
-app = FastAPI(title="ML Data Ingestion API")
+app = FastAPI(title="ML Data SQL API")
+DB_PATH = "ml_data.db"  # 로컬 테스트를 위해 경로 수정 (필요시 /data/로 변경)
 
-# In-memory storage for the processed dataset and rejections
-DATA_STORE = {
-    "merged_df": None,
-    "rejections": []  # List of dicts: {"video_id": int, "stage": str, "reason": str}
-}
+@app.post("/post_to_db")
+async def post_to_db():
+    if os.path.exists(DB_PATH):
+        return {"message": "Database already exists. Ingestion skipped."}
 
-@app.on_event("startup")
-def startup_event():
-    """
-    Initial data load and processing on server start.
-    """
-    print("[startup] Initializing Data Pipeline...")
+    print("[post_to_db] Initializing Data Pipeline (No Raw Data in Integrated)...")
     try:
-        # 1. Load raw files
+        # 1. 원본 파일 로드
         selections_raw, odds_df, labels_df = load_all()
 
-        # 2. Normalize selections (Handling the nested/flat JSON schemas)
+        # 2. 정규화 (이때 raw_data가 포함될 수 있음)
         selections_df = normalize_selections(selections_raw)
 
-        # 3. Merge Step 1: Odds (Track rejections for missing ODD)
+        # 3. Odds 조인 및 Rejections 추적
         merged_odds_df, missing_odd_ids = merge_selections_with_odds(selections_df, odds_df)
+        
+        rejections_list = []
         for vid in missing_odd_ids:
-            DATA_STORE["rejections"].append({
-                "video_id": int(vid),
-                "stage": "ODD_TAGGING",
-                "reason": "Missing entry in odds.csv"
-            })
+            raw_row = selections_df[selections_df["video_id"] == vid]
+            if not raw_row.empty:
+                rejections_list.append({
+                    "video_id": int(vid),
+                    "reason": "Missing entry in odds.csv",
+                    "raw_data": raw_row.iloc[0].to_json(date_format='iso') 
+                })
 
-        # 4. Merge Step 2: Labels (Track rejections for missing labels)
+        # 4. Labels 조인 및 동적 플래트닝
         final_df, label_stats = merge_with_labels(merged_odds_df, labels_df)
+        
         for vid in label_stats.get("join_missing", []):
-            DATA_STORE["rejections"].append({
-                "video_id": int(vid),
-                "stage": "AUTO_LABELING",
-                "reason": "Missing entry in labels.csv"
-            })
+            raw_row = merged_odds_df[merged_odds_df["video_id"] == vid]
+            if not raw_row.empty:
+                rejections_list.append({
+                    "video_id": int(vid),
+                    "reason": "Missing entry in labels.csv",
+                    "raw_data": raw_row.iloc[0].to_json(date_format='iso')
+                })
 
-        # 5. Store final clean dataset
-        DATA_STORE["merged_df"] = final_df
-        print(f"[startup] Pipeline Complete. {len(final_df)} records ready.")
+        # --- 핵심 수정 사항 ---
+        # 5. integrated_data로 들어갈 데이터에서 raw_data 컬럼 제거
+        if "raw_data" in final_df.columns:
+            final_df = final_df.drop(columns=["raw_data"])
+        # ----------------------
+
+        # 6. SQLite 적재
+        conn = sqlite3.connect(DB_PATH)
+        
+        # 메인 데이터 저장 (raw_data 없음, 가벼움)
+        final_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
+        
+        # Rejections 데이터 저장 (raw_data 포함, 추적용)
+        rejections_df = pd.DataFrame(rejections_list)
+        if not rejections_df.empty:
+            rejections_df.to_sql("rejections", conn, if_exists="replace", index=False)
+
+        # 7. 인덱스 생성
+        conn.execute("CREATE INDEX idx_vid ON integrated_data(video_id)")
+        count_cols = [c for c in final_df.columns if c.startswith("label_") and c.endswith("_count")]
+        for col in count_cols:
+            conn.execute(f"CREATE INDEX idx_{col} ON integrated_data({col})")
+        
+        conn.close()
+        
+        return {
+            "status": "success",
+            "message": "Raw data removed from integrated_data, preserved in rejections.",
+            "final_count": len(final_df),
+            "rejection_count": len(rejections_df)
+        }
 
     except Exception as e:
-        print(f"[startup] ERROR: {e}")
-
-@app.get("/rejections")
-def get_rejections(
-    stage: Optional[str] = None, 
-    reason: Optional[str] = None
-):
-    """
-    Requirement 2-2: Retrieve rejected data.
-    Supports filtering across multiple stages/reasons per video.
-    """
-    rejections = DATA_STORE["rejections"]
-
-    # 1. Filter by Stage (Checks if the requested stage is in the list)
-    if stage:
-        target_stage = stage.upper()
-        rejections = [r for r in rejections if target_stage in r["stages"]]
-    
-    # 2. Filter by Reason (Partial match across the list of reasons)
-    if reason:
-        query = reason.lower()
-        rejections = [
-            r for r in rejections 
-            if any(query in res.lower() for res in r["reasons"])
-        ]
-
-    # 3. Sort by video_id
-    sorted_rejections = sorted(rejections, key=lambda x: x["video_id"])
-
-    return {
-        "total_rejected_videos": len(sorted_rejections),
-        "items": sorted_rejections
-    }
-@app.get("/merged_data")
-def get_all_merged_data():
-    """
-    Returns the entire cleaned and integrated dataset.
-    This fulfills the 'Integrated Data' portion of the assignment.
-    """
-    df = DATA_STORE["merged_df"]
-    
-    if df is None:
-        raise HTTPException(
-            status_code=503, 
-            detail="Data pipeline has not been initialized. Please check server logs."
-        )
-    
-    # We use safe_json to handle NaN values which standard JSON cannot parse
-    return {
-        "total_records": len(df),
-        "data": safe_json(df.head(50))
-    }
+        if os.path.exists(DB_PATH): os.remove(DB_PATH)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/search")
-def search_data(filters: Dict = Body(...)):
-    df = DATA_STORE["merged_df"]
-    if df is None:
-        raise HTTPException(status_code=503, detail="Data not initialized")
+def search_data(filters: dict = Body(...)):
+    if not os.path.exists(DB_PATH):
+        raise HTTPException(status_code=503, detail="DB not initialized. Call /post_to_db first.")
 
-    results_df = df.copy()
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
-    # 1. Categorical / String Filters (Supports comma-separated: "sunny,rainy")
-    # Columns: weather, time_of_day, road_surface, source_path
-    text_cols = ["weather", "time_of_day", "road_surface", "source_path"]
-    for col in text_cols:
+    query = "SELECT * FROM integrated_data WHERE 1=1"
+    params = []
+
+    # 1. 텍스트 필터 (weather, time_of_day 등)
+    for col in ["weather", "time_of_day", "road_surface"]:
         if col in filters and filters[col]:
-            # Normalize to list and lowercase for comparison
-            allowed = [v.strip().lower() for v in str(filters[col]).split(",")]
-            results_df = results_df[results_df[col].astype(str).str.lower().isin(allowed)]
+            vals = [v.strip() for v in str(filters[col]).split(",")]
+            placeholders = ', '.join(['?'] * len(vals))
+            query += f" AND {col} IN ({placeholders})"
+            params.extend(vals)
 
-    # 2. Boolean Filters (wiper_on, headlights_on)
-    # Handles inputs like true, "true", 1, "yes"
-    for col in ["wiper_on", "headlights_on"]:
-        if col in filters and filters[col] is not None:
-            val = str(filters[col]).lower() in ["true", "1", "yes"]
-            results_df = results_df[results_df[col] == val]
-
-    # 3. Numeric Range Filters (Temperature, Wiper Level, Video ID)
-    # Usage: { "temperature_celsius_min": 5.5, "temperature_celsius_max": 20 }
-    range_map = {
-        "temperature_celsius": "temperature_celsius",
-        "temperature_fahrenheit": "temperature_fahrenheit",
-        "wiper_level": "wiper_level",
-        "video_id": "video_id"
-    }
-    for filter_prefix, col_name in range_map.items():
-        if f"{filter_prefix}_min" in filters:
-            results_df = results_df[results_df[col_name] >= float(filters[f"{filter_prefix}_min"])]
-        if f"{filter_prefix}_max" in filters:
-            results_df = results_df[results_df[col_name] <= float(filters[f"{filter_prefix}_max"])]
-
-    # 4. Dynamic Nested Label Filters
-    # Pattern: label_{object_class}_min
-    # Example: "label_bus_min": 2 will look into the 'labels' dict for 'bus' count >= 2
-    for key, value in filters.items():
+    # 2. 동적 플래트닝 레이블 필터 ( label_car_min -> label_car_count >= X )
+    for key, val in filters.items():
         if key.startswith("label_") and key.endswith("_min"):
-            obj_class = key.replace("label_", "").replace("_min", "")
-            
-            # Using a lambda to safely traverse the nested JSON dictionary
-            results_df = results_df[
-                results_df["labels"].apply(
-                    lambda x: isinstance(x, dict) and 
-                              x.get(obj_class, {}).get("count", 0) >= int(value)
-                )
-            ]
+            obj = key.replace("label_", "").replace("_min", "")
+            # DB 컬럼명 규칙: label_{obj}_count
+            query += f" AND label_{obj}_count >= ?"
+            params.append(int(val))
 
-    return {
-        "query_criteria": filters,
-        "total_found": len(results_df),
-        "results": safe_json(results_df.head(100)) # Return first 100 matches
-    }
+    # 3. 범위 필터 (Temperature)
+    if "temperature_fahrenheit_min" in filters:
+        query += " AND temperature_fahrenheit >= ?"
+        params.append(float(filters["temperature_fahrenheit_min"]))
+    if "temperature_fahrenheit_max" in filters:
+        query += " AND temperature_fahrenheit <= ?"
+        params.append(float(filters["temperature_fahrenheit_max"]))
 
-@app.get("/search-ui", response_class=HTMLResponse)
-def search_ui():
-    """HTML UI updated to specifically target the attributes of Video ID 3."""
+    cursor.execute(query, params)
+    rows = [dict(row) for row in cursor.fetchall()]
     
-    # This JSON matches the specific conditions of video_id 3:
-    # 58.2°F, Wipers Level 3, Night, 31 Cars, 26 Pedestrians
-    sample_json = {
-        "weather": "sunny",
-        "time_of_day": "night",
-        "road_surface": "dry",
-        "wiper_on": "true",
-        "wiper_level_min": 3,
-        "headlights_on": "true",
-        "temperature_fahrenheit_min": 58,
-        "temperature_fahrenheit_max": 60,
-        "label_car_min": 30,
-        "label_pedestrian_min": 25,
-        "label_traffic_sign_min": 10
-    }
+    # JSON 복구
+    for r in rows:
+        if r.get("labels"):
+            r["labels"] = json.loads(r["labels"])
+
+    conn.close()
+    return {"total_found": len(rows), "results": rows[:100]}
+
+@app.get("/rejections")
+def get_rejections():
+    if not os.path.exists(DB_PATH): return {"items": []}
+    conn = sqlite3.connect(DB_PATH)
+    # raw_data가 포함된 rejections 테이블 조회
+    df = pd.read_sql("SELECT * FROM rejections", conn)
+    conn.close()
     
-    import json
-    json_str = json.dumps(sample_json, indent=2)
+    results = df.to_dict(orient="records")
+    for r in results:
+        if r.get("raw_data"):
+            r["raw_data"] = json.loads(r["raw_data"])
+    return {"total": len(results), "items": results}
 
-    return f"""
-    <html>
-        <head>
-            <title>ML Search Tester - Video ID 3 Target</title>
-            <style>
-                body {{ font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 40px; background-color: #f0f2f5; }}
-                .container {{ max-width: 800px; margin: auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-                textarea {{ 
-                    width: 100%; 
-                    height: 350px; 
-                    font-family: 'Consolas', 'Monaco', monospace; 
-                    padding: 15px; 
-                    border: 1px solid #ddd; 
-                    border-radius: 4px; 
-                    background-color: #f8f9fa;
-                    font-size: 14px;
-                    line-height: 1.5;
-                }}
-                button {{ 
-                    padding: 12px 24px; 
-                    background-color: #28a745; 
-                    color: white; 
-                    border: none; 
-                    border-radius: 4px; 
-                    cursor: pointer; 
-                    margin-top: 15px; 
-                    font-size: 16px; 
-                    font-weight: bold;
-                }}
-                button:hover {{ background-color: #218838; }}
-                pre {{ 
-                    background: #2b2b2b; 
-                    color: #e6e6e6; 
-                    padding: 20px; 
-                    border-radius: 6px; 
-                    overflow-x: auto; 
-                    margin-top: 20px;
-                    border-left: 5px solid #28a745;
-                }}
-                .error {{ color: #dc3545; border-left-color: #dc3545; }}
-                h2 {{ color: #333; }}
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h2>ML Dataset Search API</h2>
-                <p>아래 JSON 형식으로 필터를 입련한 후 검색해보세요</p>
-                
-                <textarea id="filters">{json_str}</textarea><br>
-                
-                <button onclick="doSearch()">Run Search Query</button>
-                
-                <h3>API Response:</h3>
-                <pre id="out">// Click 'Run Search Query' to see results...</pre>
-            </div>
-
-            <script>
-                async function doSearch() {{
-                    const out = document.getElementById('out');
-                    out.innerText = "Processing request...";
-                    out.classList.remove('error');
-
-                    try {{
-                        const filterData = JSON.parse(document.getElementById('filters').value);
-                        
-                        const res = await fetch('/search', {{
-                            method: 'POST',
-                            headers: {{ 'Content-Type': 'application/json' }},
-                            body: JSON.stringify(filterData)
-                        }});
-
-                        if (!res.ok) {{
-                            const error = await res.json();
-                            throw new Error(`Server returned ${{res.status}}: ${{JSON.stringify(error)}}`);
-                        }}
-
-                        const data = await res.json();
-                        out.innerText = JSON.stringify(data, null, 2);
-                    }} catch (err) {{
-                        out.classList.add('error');
-                        out.innerText = "Error: " + err.message;
-                    }}
-                }}
-            </script>
-        </body>
-    </html>
+@app.get("/joined_data")
+def get_joined_data():
     """
-# @app.get("/search-ui", response_class=HTMLResponse)
-# def search_ui():
-#     """Simple HTML wrapper to test the search functionality."""
-#     return """
-#     <html>
-#         <body>
-#             <h1>ML Dataset Explorer</h1>
-#             <p>Enter filters (e.g., weather: sunny, label_car_min: 5)</p>
-#             <textarea id="filters" style="width:300px; height:100px">{"weather": "sunny", "label_car_min": 10}</textarea><br>
-#             <button onclick="doSearch()">Search</button>
-#             <pre id="out"></pre>
-#             <script>
-#                 async function doSearch() {
-#                     const filters = JSON.parse(document.getElementById('filters').value);
-#                     const res = await fetch('/search', {
-#                         method: 'POST',
-#                         headers: {'Content-Type': 'application/json'},
-#                         body: JSON.stringify(filters)
-#                     });
-#                     const data = await res.json();
-#                     document.getElementById('out').innerText = JSON.stringify(data, null, 2);
-#                 }
-#             </script>
-#         </body>
-#     </html>
-#     """
+    DB에 적재된 최종 통합 데이터 중 상위 10개를 반환합니다.
+    (Flattening된 컬럼과 원본 labels 객체를 모두 포함)
+    """
+    if not os.path.exists(DB_PATH):
+        raise HTTPException(status_code=503, detail="DB not initialized. Call /post_to_db first.")
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row  # 결과를 딕셔너리 형태로 받기 위해 설정
+        cursor = conn.cursor()
+
+        # 상위 10개 데이터 조회
+        cursor.execute("SELECT * FROM integrated_data LIMIT 10")
+        rows = cursor.fetchall()
+        
+        # Row 객체를 dict로 변환하고, 문자열로 저장된 labels를 JSON 객체로 파싱
+        results = []
+        for row in rows:
+            item = dict(row)
+            if item.get("labels"):
+                try:
+                    item["labels"] = json.loads(item["labels"])
+                except:
+                    pass # 파싱 실패 시 문자열 그대로 유지
+            results.append(item)
+
+        conn.close()
+
+        return {
+            "count": len(results),
+            "data": results
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
