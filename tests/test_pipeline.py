@@ -124,3 +124,93 @@ def test_id_type_resilience():
     # merge_with_labels should be resilient (usually handled by normalization)
     final_df, _ = merge_with_labels(merged_df, labels_df)
     assert len(final_df) == 1
+
+    # --- 4. Tests for ODD Metadata Edge Cases (Stage 1) ---
+
+def test_merge_selections_with_odds_edge_cases():
+    """
+    Test Requirement: Handle missing_odd_metadata and duplicate_odd_metadata (ID 4938 case).
+    """
+    # Selections represent what we WANT to process
+    selections_df = pd.DataFrame([
+        {"video_id": 101, "raw_data": "{...}"}, # Valid match
+        {"video_id": 102, "raw_data": "{...}"}, # Missing in odds.csv
+        {"video_id": 103, "raw_data": "{...}"}, # Duplicate in odds.csv (Case 4938)
+    ])
+
+    # Odds represent the metadata we HAVE
+    odds_df = pd.DataFrame([
+        # ID 101: Perfect match
+        {"video_id": 101, "od_version": "v1", "weather": "sunny"},
+        # ID 103: Duplicate entries (different metadata but same ID)
+        {"video_id": 103, "od_version": "v1", "weather": "rainy"},
+        {"video_id": 103, "od_version": "v2", "weather": "stormy"},
+        # ID 999: Extra data (not in selections, should be ignored)
+        {"video_id": 999, "od_version": "v1", "weather": "clear"}
+    ])
+
+    # Unpack based on your Tuple[pd.DataFrame, list, list] signature
+    merged_df, missing_ids, duplicate_ids = merge_selections_with_odds(selections_df, odds_df)
+
+    # 1. Verify Missing IDs
+    assert 102 in missing_ids
+    assert 101 not in missing_ids
+
+    # 2. Verify Duplicate IDs (The 4938 check)
+    assert 103 in duplicate_ids
+    assert 101 not in duplicate_ids
+
+    # 3. Verify Clean Merged Output
+    # Only ID 101 should survive the "Strict" inner merge
+    assert len(merged_df) == 1
+    assert merged_df.iloc[0]["video_id"] == 101
+    assert "weather" in merged_df.columns
+
+def test_odds_with_null_values():
+    """Verify that ODD metadata with NaN values doesn't break the merge."""
+    selections_df = pd.DataFrame([{"video_id": 1}])
+    odds_df = pd.DataFrame([
+        {"video_id": 1, "od_version": None, "weather": np.nan}
+    ])
+
+    merged_df, missing, duplicates = merge_selections_with_odds(selections_df, odds_df)
+    
+    assert len(merged_df) == 1
+    assert pd.isna(merged_df.iloc[0]["weather"])
+
+def test_odds_empty_inputs():
+    """Verify pipeline resilience when files are empty."""
+    empty_selections = pd.DataFrame(columns=["video_id"])
+    empty_odds = pd.DataFrame(columns=["video_id"])
+    
+    merged_df, missing, duplicates = merge_selections_with_odds(empty_selections, empty_odds)
+    
+    assert merged_df.empty
+    assert missing == []
+    assert duplicates == []
+
+# --- 5. Integration: Stage 1 to Stage 2 Handover ---
+
+def test_full_pipeline_handover():
+    """Verify that Stage 1 output flows correctly into Stage 2."""
+    # Setup Stage 1 inputs
+    sel = pd.DataFrame([{"video_id": 1}, {"video_id": 2}]) # 2 is duplicate
+    odd = pd.DataFrame([
+        {"video_id": 1, "meta": "A"},
+        {"video_id": 2, "meta": "B1"},
+        {"video_id": 2, "meta": "B2"}
+    ])
+    lab = pd.DataFrame([
+        {"video_id": 1, "object_class": "car", "obj_count": 1, "avg_confidence": 0.9}
+    ])
+
+    # Stage 1
+    merged, missing, dups = merge_selections_with_odds(sel, odd)
+    # Stage 2
+    final_df, stats = merge_with_labels(merged, lab)
+
+    # ID 1: Passes everything
+    # ID 2: Rejected at Stage 1 (Duplicate) -> Never reaches Stage 2
+    assert len(final_df) == 1
+    assert final_df.iloc[0]["video_id"] == 1
+    assert 2 in dups
