@@ -60,57 +60,58 @@ def merge_selections_with_odds(selections_df, odds_df) -> Tuple[pd.DataFrame, Li
     merged = pd.merge(selections_df, odds_df, on="video_id", how="inner")
     return merged, rejected_ids
 def merge_with_labels(merged_df, labels_df) -> Tuple[pd.DataFrame, Dict]:
-    # --- STEP 1: AGGREGATE DUPLICATES (Handling your concern) ---
-    # video_id와 object_class가 같은 행이 여러 개일 경우 하나로 합칩니다.
-    # Count는 합산(sum), Confidence는 평균(mean)을 내는 것이 일반적입니다.
-    labels_df = labels_df.groupby(["video_id", "object_class"]).agg({
-        "obj_count": "sum",
-        "avg_confidence": "mean"
-    }).reset_index()
-
-    # --- STEP 2: NOISE DETECTION (Negative Counts) ---
-    negative_rows = labels_df[labels_df["obj_count"] < 0].copy()
-    invalid_vids = negative_rows["video_id"].unique()
+    # 1. Detect Duplicates (Same Video + Same Object Class)
+    duplicate_mask = labels_df.duplicated(subset=["video_id", "object_class"], keep=False)
+    duplicate_rows = labels_df[duplicate_mask].copy()
+    duplicate_vids = duplicate_rows["video_id"].unique()
     
-    neg_reasons = negative_rows.groupby("video_id").apply(
-        lambda x: f"INVALID_NEGATIVE_COUNT: {', '.join(x['object_class'].unique())}",
+    # Map reason: "duplicate_label: car, bus"
+    dup_reasons = duplicate_rows.groupby("video_id").apply(
+        lambda x: f"duplicate_label: {', '.join(x['object_class'].unique())}",
         include_groups=False
     ).to_dict()
 
-    # --- STEP 3: CLEANING ---
-    clean_labels_df = labels_df[~labels_df["video_id"].isin(invalid_vids)].copy()
+    # 2. Detect Negative Counts
+    negative_rows = labels_df[labels_df["obj_count"] < 0].copy()
+    invalid_vids = negative_rows["video_id"].unique()
     
-    # --- STEP 4: PIVOTING (Now safe from "Duplicate Entry" errors) ---
-    counts_pivot = clean_labels_df.pivot(
-        index="video_id", 
-        columns="object_class", 
-        values="obj_count"
-    ).fillna(0).astype(int)
+    # Map reason: "negative_obj_count: pedestrian"
+    neg_reasons = negative_rows.groupby("video_id").apply(
+        lambda x: f"negative_obj_count: {', '.join(x['object_class'].unique())}",
+        include_groups=False
+    ).to_dict()
+
+    # 3. Combine all invalid IDs for filtering
+    bad_vids = set(duplicate_vids) | set(invalid_vids)
+    
+    # 4. Filter for Integrated Data
+    clean_labels_df = labels_df[~labels_df["video_id"].isin(bad_vids)].copy()
+    
+    # 5. Fast Pivot & JSON Creation
+    counts_pivot = clean_labels_df.pivot(index="video_id", columns="object_class", values="obj_count").fillna(0).astype(int)
     counts_pivot.columns = [f"label_{col}_count" for col in counts_pivot.columns]
     
-    # --- STEP 5: NESTED JSON CREATION ---
     labels_pivot = clean_labels_df.groupby("video_id").apply(
         lambda x: {row.object_class: {"count": row.obj_count, "avg_confidence": row.avg_confidence} 
                    for row in x.itertuples()},
         include_groups=False
     ).reset_index(name="labels")
     
-    # --- STEP 6: FINAL MERGE ---
+    # 6. Final Join
     final_df = merged_df.merge(labels_pivot, on="video_id", how="inner")
     final_df = final_df.merge(counts_pivot.reset_index(), on="video_id", how="left")
     
-    # Fill any NaNs in the count columns
-    count_cols = [c for c in final_df.columns if c.startswith("label_") and c.endswith("_count")]
-    final_df[count_cols] = final_df[count_cols].fillna(0).astype(int)
-
-    # --- STEP 7: STATS FOR REJECTIONS ---
+    # 7. Compile error stats
     missing_ids = set(merged_df["video_id"]) - set(labels_pivot["video_id"])
+    
+    # Merge error maps (Duplicates take priority if both exist)
+    error_map = {**neg_reasons, **dup_reasons}
+
     stats = {
-        "missing_ids": list(missing_ids - set(invalid_vids)),
-        "negative_count_map": neg_reasons
+        "missing_ids": list(missing_ids - bad_vids),
+        "error_map": error_map 
     }
     
-    # Vectorized JSON string conversion for SQL
     final_df["labels"] = final_df["labels"].apply(json.dumps)
     
     return final_df, stats

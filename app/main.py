@@ -14,96 +14,76 @@ from app.preprocessing.preprocessing import (
 
 app = FastAPI(title="ML Data SQL API")
 DB_PATH = "ml_data.db"
-
 @app.post("/analyze")
 async def analyze():
     """
-    Requirement 2-1 & 2-2: 정제, 통합, 적재 프로세스.
-    - 거부 사유(Reason)와 발생 단계(Stage)를 명확히 구분하여 저장합니다.
-    - 음수 객체 카운트 등 노이즈 데이터를 탐지하여 Rejection 처리합니다.
+    [Requirement 2-1 & 2-2]
+    Classifies rejections into: missing_odd_metadata, missing_label_data, 
+    negative_obj_count, and duplicate_label.
     """
     if os.path.exists(DB_PATH):
         return {"message": "Database already exists. Ingestion skipped."}
 
-    print("[analyze] Starting optimized data pipeline with noise detection...")
-    
     try:
-        # 1. 원본 데이터 로드
         selections_raw, odds_df, labels_df = load_all()
-
-        # 2. 정규화 (Selection 단계)
         selections_df = normalize_selections(selections_raw)
 
-        # 3. ODD Tagging 단계 조인 및 Rejection 추출
+        # Stage 1: ODD Step
         merged_odds_df, missing_odd_ids = merge_selections_with_odds(selections_df, odds_df)
-        
-        # ODD 단계 거부 데이터 (Missing metadata)
         rejection_odds = selections_df[selections_df["video_id"].isin(missing_odd_ids)].copy()
-        rejection_odds["reason"] = "MISSING_ODD_METADATA"
+        rejection_odds["reason"] = "missing_odd_metadata"
         rejection_odds["stage"] = "odd_tagging_step"
 
-        # 4. Auto Labeling 단계 조인 및 노이즈 필터링
-        # merge_with_labels 함수에서 음수 카운트(Noise)를 탐지하여 반환하도록 설계됨
+        # Stage 2: Labeling Step
         final_df, label_stats = merge_with_labels(merged_odds_df, labels_df)
         
-        # A. 레이블 데이터 자체가 없는 경우
+        # Missing data rejection
         missing_ids = label_stats.get("missing_ids", [])
         rejection_missing = merged_odds_df[merged_odds_df["video_id"].isin(missing_ids)].copy()
-        rejection_missing["reason"] = "MISSING_AUTO_LABELS"
+        rejection_missing["reason"] = "missing_label_data"
         rejection_missing["stage"] = "auto_labeling_step"
 
-        # B. 음수 카운트 등 노이즈 데이터인 경우 (Specific Reason 포함)
-        neg_map = label_stats.get("negative_count_map", {})
-        rejection_noise = merged_odds_df[merged_odds_df["video_id"].isin(neg_map.keys())].copy()
-        rejection_noise["reason"] = rejection_noise["video_id"].map(neg_map) # 예: "INVALID_NEGATIVE_COUNT: car"
-        rejection_noise["stage"] = "auto_labeling_step"
+        # Noise/Integrity rejection (negative_obj_count or duplicate_label)
+        error_map = label_stats.get("error_map", {})
+        rejection_errors = merged_odds_df[merged_odds_df["video_id"].isin(error_map.keys())].copy()
+        rejection_errors["reason"] = rejection_errors["video_id"].map(error_map)
+        rejection_errors["stage"] = "auto_labeling_step"
 
-        # 5. 모든 Rejection 통합
-        all_rejections_df = pd.concat([rejection_odds, rejection_missing, rejection_noise], ignore_index=True)
+        # Combine
+        all_rejections_df = pd.concat([rejection_odds, rejection_missing, rejection_errors], ignore_index=True)
         
-        # 6. SQLite 연결 및 데이터 적재
+        # Save to DB
         conn = sqlite3.connect(DB_PATH)
-
-        # Rejection 테이블 저장 (Requirement 2-2 필터링을 위해 stage, reason 포함)
         if not all_rejections_df.empty:
-            rejections_to_save = all_rejections_df[["video_id", "reason", "stage", "raw_data"]].copy()
-            rejections_to_save.to_sql("rejections", conn, if_exists="replace", index=False)
+            all_rejections_df[["video_id", "reason", "stage", "raw_data"]].to_sql(
+                "rejections", conn, if_exists="replace", index=False
+            )
 
-        # Integrated Data 저장 (raw_data 제거하여 경량화)
         if "raw_data" in final_df.columns:
             final_df = final_df.drop(columns=["raw_data"])
         final_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
 
-        # 7. 성능 최적화를 위한 인덱스 생성 (Requirement 2-3 검색 성능 최적화)
-        conn.execute("CREATE INDEX idx_vid ON integrated_data(video_id)")
-        conn.execute("CREATE INDEX idx_weather ON integrated_data(weather)")
+        # Indexing for performance
         conn.execute("CREATE INDEX idx_rej_stage ON rejections(stage)")
         conn.execute("CREATE INDEX idx_rej_reason ON rejections(reason)")
         
-        # 동적으로 생성된 label_count 컬럼들에 대해 인덱스 생성
         count_cols = [c for c in final_df.columns if c.startswith("label_") and c.endswith("_count")]
         for col in count_cols:
             conn.execute(f"CREATE INDEX idx_{col} ON integrated_data({col})")
         
         conn.close()
 
-        print(f"[analyze] Complete. Integrated: {len(final_df)}, Rejected: {len(all_rejections_df)}")
-        
         return {
             "status": "success",
-            "counts": {
+            "summary": {
                 "integrated": len(final_df),
-                "rejected_total": len(all_rejections_df),
-                "rejected_odd_step": len(rejection_odds),
-                "rejected_label_step": len(rejection_missing) + len(rejection_noise)
+                "rejected": len(all_rejections_df)
             }
         }
 
     except Exception as e:
-        if os.path.exists(DB_PATH): 
-            os.remove(DB_PATH)
-        print(f"[analyze] Error: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Data pipeline failed: {str(e)}")
+        if os.path.exists(DB_PATH): os.remove(DB_PATH)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/rejections")
 def get_rejections(
