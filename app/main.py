@@ -163,8 +163,11 @@ def search_data(
                     "temperature_fahrenheit_max": 59,
                     "wiper_on": 1,
                     "headlights_on": 1,
-                    "label_car_min": 30,
-                    "label_pedestrian_min": 20
+                    "wiper_level_min": 3,
+                    "wiper_level_max": 3,
+                    "label_car_min": 31,
+                    "label_car_max": 31,
+                    "label_pedestrian_min": 11
                 }
             }
         }
