@@ -30,7 +30,6 @@ async def analyze():
         selections_df = normalize_selections(selections_raw)
 
         # --- STAGE 1: ODD Step ---
-        # FIX: Unpack all 3 values returned by your helper function
         merged_odds_df, missing_odd_ids, duplicate_odd_ids = merge_selections_with_odds(selections_df, odds_df)
         
         # A. REJECTION: Missing ODD Metadata
@@ -39,13 +38,11 @@ async def analyze():
         rejection_missing_odds["stage"] = "odd_tagging_step"
 
         # B. REJECTION: Duplicate ODD Metadata (e.g., ID 4938)
-        # We look back at the original selections_df to get the records for these duplicate IDs
         rejection_duplicates = selections_df[selections_df["video_id"].isin(duplicate_odd_ids)].copy()
         rejection_duplicates["reason"] = "duplicate_odd_metadata"
         rejection_duplicates["stage"] = "odd_tagging_step"
 
         # --- STAGE 2: Labeling Step ---
-        # The merged_odds_df is already "clean" (duplicates removed by your helper)
         final_df, label_stats = merge_with_labels(merged_odds_df, labels_df)
         
         # C. REJECTION: Missing Label Data
@@ -60,40 +57,54 @@ async def analyze():
         rejection_errors["reason"] = rejection_errors["video_id"].map(error_map)
         rejection_errors["stage"] = "auto_labeling_step"
 
-        # --- COMBINE AND SAVE ---
+        # --- COMBINE ---
         frames = [rejection_missing_odds, rejection_duplicates, rejection_missing_labels, rejection_errors]
         all_rejections_df = pd.concat([f for f in frames if not f.empty], ignore_index=True)
         
+        # --- GENERATE SUMMARY STATS ---
+        # This creates a dictionary of counts per stage and reason
+        rejection_summary = {}
+        if not all_rejections_df.empty:
+            # Summary by Stage
+            stage_counts = all_rejections_df["stage"].value_counts().to_dict()
+            # Summary by Reason
+            reason_counts = all_rejections_df["reason"].value_counts().to_dict()
+            
+            rejection_summary = {
+                "by_stage": stage_counts,
+                "by_reason": reason_counts
+            }
+
+        # --- SAVE TO DATABASE ---
         conn = sqlite3.connect(DB_PATH)
         
-        # Save Rejections
         if not all_rejections_df.empty:
             save_cols = ["video_id", "reason", "stage", "raw_data"]
             existing = [c for c in save_cols if c in all_rejections_df.columns]
             all_rejections_df[existing].to_sql("rejections", conn, if_exists="replace", index=False)
 
-        # Save Integrated Data
         if "raw_data" in final_df.columns:
             final_df = final_df.drop(columns=["raw_data"])
         final_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
 
-        # Performance Indexing
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rej_reason ON rejections(reason)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rej_stage ON rejections(stage)")
-        
         conn.close()
+
         return {
             "status": "success", 
-            "integrated": len(final_df), 
-            "rejected": len(all_rejections_df)
+            "counts": {
+                "integrated": len(final_df), 
+                "total_rejected": len(all_rejections_df)
+            },
+            "rejection_breakdown": rejection_summary
         }
 
     except Exception as e:
         if os.path.exists(DB_PATH): 
             os.remove(DB_PATH)
-        # Re-raising the error with more context for debugging
         raise HTTPException(status_code=500, detail=f"Pipeline Failure: {str(e)}")
-
+    
 @app.get("/rejections")
 def get_rejections(
     reason: Optional[str] = None, 
