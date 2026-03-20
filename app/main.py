@@ -14,17 +14,21 @@ from app.preprocessing.preprocessing import (
 
 app = FastAPI(title="ML Data SQL API")
 DB_PATH = "ml_data.db"
+
 @app.post("/analyze")
 async def analyze():
     """
-    [Requirement 2-1 & 2-2]
-    Classifies rejections into: missing_odd_metadata, missing_label_data, 
-    negative_obj_count, and duplicate_label.
+    Strict Data Pipeline with categorization for rejections.
+    Stages: odd_tagging_step, auto_labeling_step
+    Reasons: missing_odd_metadata, missing_label_data, 
+             negative_obj_count, duplicate_label, 
+             invalid_object_class, non_integer_obj_count
     """
     if os.path.exists(DB_PATH):
         return {"message": "Database already exists. Ingestion skipped."}
 
     try:
+        # Load and Normalize
         selections_raw, odds_df, labels_df = load_all()
         selections_df = normalize_selections(selections_raw)
 
@@ -43,16 +47,16 @@ async def analyze():
         rejection_missing["reason"] = "missing_label_data"
         rejection_missing["stage"] = "auto_labeling_step"
 
-        # Noise/Integrity rejection (negative_obj_count or duplicate_label)
+        # Integrity/Noise rejection (Captures: duplicate_label, negative_obj_count,
+        #                           invalid_object_class, non_integer_obj_count)
         error_map = label_stats.get("error_map", {})
         rejection_errors = merged_odds_df[merged_odds_df["video_id"].isin(error_map.keys())].copy()
         rejection_errors["reason"] = rejection_errors["video_id"].map(error_map)
         rejection_errors["stage"] = "auto_labeling_step"
 
-        # Combine
+        # Combine and Save
         all_rejections_df = pd.concat([rejection_odds, rejection_missing, rejection_errors], ignore_index=True)
         
-        # Save to DB
         conn = sqlite3.connect(DB_PATH)
         if not all_rejections_df.empty:
             all_rejections_df[["video_id", "reason", "stage", "raw_data"]].to_sql(
@@ -63,23 +67,12 @@ async def analyze():
             final_df = final_df.drop(columns=["raw_data"])
         final_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
 
-        # Indexing for performance
-        conn.execute("CREATE INDEX idx_rej_stage ON rejections(stage)")
+        # Performance Indexing
         conn.execute("CREATE INDEX idx_rej_reason ON rejections(reason)")
-        
-        count_cols = [c for c in final_df.columns if c.startswith("label_") and c.endswith("_count")]
-        for col in count_cols:
-            conn.execute(f"CREATE INDEX idx_{col} ON integrated_data({col})")
+        conn.execute("CREATE INDEX idx_rej_stage ON rejections(stage)")
         
         conn.close()
-
-        return {
-            "status": "success",
-            "summary": {
-                "integrated": len(final_df),
-                "rejected": len(all_rejections_df)
-            }
-        }
+        return {"status": "success", "integrated": len(final_df), "rejected": len(all_rejections_df)}
 
     except Exception as e:
         if os.path.exists(DB_PATH): os.remove(DB_PATH)

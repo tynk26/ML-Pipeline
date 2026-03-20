@@ -59,35 +59,60 @@ def merge_selections_with_odds(selections_df, odds_df) -> Tuple[pd.DataFrame, Li
     
     merged = pd.merge(selections_df, odds_df, on="video_id", how="inner")
     return merged, rejected_ids
+
 def merge_with_labels(merged_df, labels_df) -> Tuple[pd.DataFrame, Dict]:
-    # 1. Detect Duplicates (Same Video + Same Object Class)
-    duplicate_mask = labels_df.duplicated(subset=["video_id", "object_class"], keep=False)
-    duplicate_rows = labels_df[duplicate_mask].copy()
-    duplicate_vids = duplicate_rows["video_id"].unique()
-    
-    # Map reason: "duplicate_label: car, bus"
-    dup_reasons = duplicate_rows.groupby("video_id").apply(
-        lambda x: f"duplicate_label: {', '.join(x['object_class'].unique())}",
+    """
+    Requirement 2-1 & 2-2: Advanced Data Cleaning & Rejection.
+    Detects duplicates, negatives, non-integers, and invalid classes.
+    """
+    # 1. Detect Invalid Object Classes (null, empty, "unknown", "null")
+    invalid_class_mask = (
+        labels_df["object_class"].isna() | 
+        (labels_df["object_class"].astype(str).str.strip() == "") |
+        (labels_df["object_class"].astype(str).str.lower().isin(["unknown", "null"]))
+    )
+    invalid_class_vids = labels_df[invalid_class_mask]["video_id"].unique()
+    class_err_map = {vid: "invalid_object_class" for vid in invalid_class_vids}
+
+    # 2. Detect Non-Integer Counts (Floating point with actual decimals, e.g., 14.5)
+    # Note: 14.0 is considered an integer here.
+    non_int_mask = (labels_df["obj_count"] % 1 != 0)
+    non_int_rows = labels_df[non_int_mask].copy()
+    non_int_vids = non_int_rows["video_id"].unique()
+    non_int_err_map = non_int_rows.groupby("video_id").apply(
+        lambda x: f"non_integer_obj_count: {', '.join(x['object_class'].unique())}",
         include_groups=False
     ).to_dict()
 
-    # 2. Detect Negative Counts
+    # 3. Detect Negative Counts
     negative_rows = labels_df[labels_df["obj_count"] < 0].copy()
-    invalid_vids = negative_rows["video_id"].unique()
-    
-    # Map reason: "negative_obj_count: pedestrian"
-    neg_reasons = negative_rows.groupby("video_id").apply(
+    neg_vids = negative_rows["video_id"].unique()
+    neg_err_map = negative_rows.groupby("video_id").apply(
         lambda x: f"negative_obj_count: {', '.join(x['object_class'].unique())}",
         include_groups=False
     ).to_dict()
 
-    # 3. Combine all invalid IDs for filtering
-    bad_vids = set(duplicate_vids) | set(invalid_vids)
+    # 4. Detect Duplicates (Same Video + Same Object Class)
+    dup_mask = labels_df.duplicated(subset=["video_id", "object_class"], keep=False)
+    dup_rows = labels_df[dup_mask].copy()
+    dup_vids = dup_rows["video_id"].unique()
+    dup_err_map = dup_rows.groupby("video_id").apply(
+        lambda x: f"duplicate_label: {', '.join(x['object_class'].unique())}",
+        include_groups=False
+    ).to_dict()
+
+    # 5. Combine all invalid IDs
+    bad_vids = set(invalid_class_vids) | set(non_int_vids) | set(neg_vids) | set(dup_vids)
     
-    # 4. Filter for Integrated Data
+    # Combined Error Map (Priority: Class > Non-Int > Neg > Dup)
+    error_map = {**dup_err_map, **neg_err_map, **non_int_err_map, **class_err_map}
+
+    # 6. Filter and Aggregate
     clean_labels_df = labels_df[~labels_df["video_id"].isin(bad_vids)].copy()
+    # Cast to int now that we know they are whole numbers
+    clean_labels_df["obj_count"] = clean_labels_df["obj_count"].astype(int)
     
-    # 5. Fast Pivot & JSON Creation
+    # Fast Pivot & JSON Creation
     counts_pivot = clean_labels_df.pivot(index="video_id", columns="object_class", values="obj_count").fillna(0).astype(int)
     counts_pivot.columns = [f"label_{col}_count" for col in counts_pivot.columns]
     
@@ -97,23 +122,17 @@ def merge_with_labels(merged_df, labels_df) -> Tuple[pd.DataFrame, Dict]:
         include_groups=False
     ).reset_index(name="labels")
     
-    # 6. Final Join
+    # 7. Final Join
     final_df = merged_df.merge(labels_pivot, on="video_id", how="inner")
     final_df = final_df.merge(counts_pivot.reset_index(), on="video_id", how="left")
     
-    # 7. Compile error stats
     missing_ids = set(merged_df["video_id"]) - set(labels_pivot["video_id"])
-    
-    # Merge error maps (Duplicates take priority if both exist)
-    error_map = {**neg_reasons, **dup_reasons}
-
     stats = {
         "missing_ids": list(missing_ids - bad_vids),
         "error_map": error_map 
     }
     
     final_df["labels"] = final_df["labels"].apply(json.dumps)
-    
     return final_df, stats
 
 def safe_json(df: pd.DataFrame):
