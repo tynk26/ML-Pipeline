@@ -20,63 +20,79 @@ async def analyze():
     """
     Strict Data Pipeline with categorization for rejections.
     Stages: odd_tagging_step, auto_labeling_step
-    Reasons: missing_odd_metadata, missing_label_data, 
-             negative_obj_count, duplicate_label, 
-             invalid_object_class, non_integer_obj_count
     """
     if os.path.exists(DB_PATH):
         return {"message": "Database already exists. Ingestion skipped."}
 
     try:
-        # Load and Normalize
+        # 1. Load and Normalize
         selections_raw, odds_df, labels_df = load_all()
         selections_df = normalize_selections(selections_raw)
 
-        # Stage 1: ODD Step
-        merged_odds_df, missing_odd_ids = merge_selections_with_odds(selections_df, odds_df)
-        rejection_odds = selections_df[selections_df["video_id"].isin(missing_odd_ids)].copy()
-        rejection_odds["reason"] = "missing_odd_metadata"
-        rejection_odds["stage"] = "odd_tagging_step"
+        # --- STAGE 1: ODD Step ---
+        # FIX: Unpack all 3 values returned by your helper function
+        merged_odds_df, missing_odd_ids, duplicate_odd_ids = merge_selections_with_odds(selections_df, odds_df)
+        
+        # A. REJECTION: Missing ODD Metadata
+        rejection_missing_odds = selections_df[selections_df["video_id"].isin(missing_odd_ids)].copy()
+        rejection_missing_odds["reason"] = "missing_odd_metadata"
+        rejection_missing_odds["stage"] = "odd_tagging_step"
 
-        # Stage 2: Labeling Step
+        # B. REJECTION: Duplicate ODD Metadata (e.g., ID 4938)
+        # We look back at the original selections_df to get the records for these duplicate IDs
+        rejection_duplicates = selections_df[selections_df["video_id"].isin(duplicate_odd_ids)].copy()
+        rejection_duplicates["reason"] = "duplicate_odd_metadata"
+        rejection_duplicates["stage"] = "odd_tagging_step"
+
+        # --- STAGE 2: Labeling Step ---
+        # The merged_odds_df is already "clean" (duplicates removed by your helper)
         final_df, label_stats = merge_with_labels(merged_odds_df, labels_df)
         
-        # Missing data rejection
-        missing_ids = label_stats.get("missing_ids", [])
-        rejection_missing = merged_odds_df[merged_odds_df["video_id"].isin(missing_ids)].copy()
-        rejection_missing["reason"] = "missing_label_data"
-        rejection_missing["stage"] = "auto_labeling_step"
+        # C. REJECTION: Missing Label Data
+        missing_label_ids = label_stats.get("missing_ids", [])
+        rejection_missing_labels = merged_odds_df[merged_odds_df["video_id"].isin(missing_label_ids)].copy()
+        rejection_missing_labels["reason"] = "missing_label_data"
+        rejection_missing_labels["stage"] = "auto_labeling_step"
 
-        # Integrity/Noise rejection (Captures: duplicate_label, negative_obj_count,
-        #                           invalid_object_class, non_integer_obj_count)
+        # D. REJECTION: Integrity/Noise (from error_map)
         error_map = label_stats.get("error_map", {})
         rejection_errors = merged_odds_df[merged_odds_df["video_id"].isin(error_map.keys())].copy()
         rejection_errors["reason"] = rejection_errors["video_id"].map(error_map)
         rejection_errors["stage"] = "auto_labeling_step"
 
-        # Combine and Save
-        all_rejections_df = pd.concat([rejection_odds, rejection_missing, rejection_errors], ignore_index=True)
+        # --- COMBINE AND SAVE ---
+        frames = [rejection_missing_odds, rejection_duplicates, rejection_missing_labels, rejection_errors]
+        all_rejections_df = pd.concat([f for f in frames if not f.empty], ignore_index=True)
         
         conn = sqlite3.connect(DB_PATH)
+        
+        # Save Rejections
         if not all_rejections_df.empty:
-            all_rejections_df[["video_id", "reason", "stage", "raw_data"]].to_sql(
-                "rejections", conn, if_exists="replace", index=False
-            )
+            save_cols = ["video_id", "reason", "stage", "raw_data"]
+            existing = [c for c in save_cols if c in all_rejections_df.columns]
+            all_rejections_df[existing].to_sql("rejections", conn, if_exists="replace", index=False)
 
+        # Save Integrated Data
         if "raw_data" in final_df.columns:
             final_df = final_df.drop(columns=["raw_data"])
         final_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
 
         # Performance Indexing
-        conn.execute("CREATE INDEX idx_rej_reason ON rejections(reason)")
-        conn.execute("CREATE INDEX idx_rej_stage ON rejections(stage)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rej_reason ON rejections(reason)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_rej_stage ON rejections(stage)")
         
         conn.close()
-        return {"status": "success", "integrated": len(final_df), "rejected": len(all_rejections_df)}
+        return {
+            "status": "success", 
+            "integrated": len(final_df), 
+            "rejected": len(all_rejections_df)
+        }
 
     except Exception as e:
-        if os.path.exists(DB_PATH): os.remove(DB_PATH)
-        raise HTTPException(status_code=500, detail=str(e))
+        if os.path.exists(DB_PATH): 
+            os.remove(DB_PATH)
+        # Re-raising the error with more context for debugging
+        raise HTTPException(status_code=500, detail=f"Pipeline Failure: {str(e)}")
 
 @app.get("/rejections")
 def get_rejections(

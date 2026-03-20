@@ -48,17 +48,27 @@ def normalize_selections(selections: list) -> pd.DataFrame:
     df["wiper_level"] = df["wiper_level"].fillna(0).astype(int)
     return df
 
-def merge_selections_with_odds(selections_df, odds_df) -> Tuple[pd.DataFrame, List[int]]:
-    # 기존 로직 유지 (Inner Join)
-    selections_df["video_id"] = selections_df["video_id"].astype(int)
-    odds_df["video_id"] = odds_df["video_id"].astype(int)
+def merge_selections_with_odds(selections_df, odds_df) -> Tuple[pd.DataFrame, list, list]:
+    """
+    Identifies missing ODD metadata and duplicate ODD metadata.
+    Returns: (merged_df, missing_ids, duplicate_ids)
+    """
+    # 1. Identify duplicates in odds_df
+    duplicate_mask = odds_df.duplicated(subset=["video_id"], keep=False)
+    duplicate_odd_vids = odds_df[duplicate_mask]["video_id"].unique().tolist()
     
-    existing_ids = set(odds_df["video_id"].unique())
-    all_ids = set(selections_df["video_id"].unique())
-    rejected_ids = sorted(all_ids - existing_ids)
+    # 2. Identify missing IDs (In selections but not in odds)
+    selection_ids = set(selections_df["video_id"])
+    odd_ids = set(odds_df["video_id"])
+    missing_odd_ids = list(selection_ids - odd_ids)
     
-    merged = pd.merge(selections_df, odds_df, on="video_id", how="inner")
-    return merged, rejected_ids
+    # 3. Create a clean odds dataframe (no duplicates)
+    clean_odds_df = odds_df[~odds_df["video_id"].isin(duplicate_odd_vids)]
+    
+    # 4. Perform Merge
+    merged_df = selections_df.merge(clean_odds_df, on="video_id", how="inner")
+    
+    return merged_df, missing_odd_ids, duplicate_odd_vids
 
 def merge_with_labels(merged_df, labels_df) -> Tuple[pd.DataFrame, Dict]:
     """
