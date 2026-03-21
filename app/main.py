@@ -301,18 +301,18 @@ def get_rejections(
 def get_rejections(
     stage: Optional[str] = Query(
         None, 
-        description="특정 단계 필터 (미선택 시 전체 단계 조회)",
+        description="특정 단계 필터 (미선택 시 전체 단계)",
         openapi_examples={
-            "All": {"summary": "전체 보기", "value": None},
+            "All": {"summary": "전체 단계", "value": None},
             "Step 1: ODD": {"value": "odd_tagging_step"},
             "Step 2: Labeling": {"value": "auto_labeling_step"}
         }
     ),
     reason: Optional[str] = Query(
         None, 
-        description="특정 사유 필터 (미선택 시 전체 사유 조회)",
+        description="7가지 사유 중 필터 (미선택 시 전체 사유)",
         openapi_examples={
-            "All": {"summary": "전체 보기", "value": None},
+            "All": {"summary": "전체 사유", "value": None},
             "ODD: Missing Metadata": {"value": "missing_odd_metadata"},
             "ODD: Duplicate ID": {"value": "duplicate_odd_metadata"},
             "Label: Missing Data": {"value": "missing_label_data"},
@@ -325,65 +325,68 @@ def get_rejections(
     page: int = Query(1, ge=1), 
     size: int = Query(50, ge=1, le=100)
 ):
-    """
-    ### 🛡️ 리젝션 통합 조회 (Waterfall 구조 적용)
-    
-    1단계(ODD) 결함 발견 시 2단계(Labeling) 검증을 건너뛰는 Waterfall 원칙이 적용되었습니다.
-    이제 각 단계별 사유가 논리적으로 엄격히 분리되어 표시됩니다.
-    """
     if not os.path.exists(DB_PATH):
-        return {"status": "error", "message": "데이터베이스가 존재하지 않습니다."}
+        return {"status": "error", "message": "DB 파일이 없습니다."}
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # --- [1] Overall Stats: 시스템 전체 현황 (항상 노출) ---
+    # 1. Overall Stats (전체 대시보드 현황)
     cursor.execute("SELECT stage, reason FROM rejections")
-    all_rows = cursor.fetchall()
+    all_rejections = cursor.fetchall()
     
     overall_stats = {
-        "total_quarantined": len(all_rows),
+        "total_quarantined": len(all_rejections),
         "by_stage": {"odd_tagging_step": 0, "auto_labeling_step": 0},
-        "by_reason": {} # 7대 사유별 개별 카운트
+        "by_reason": {
+            "missing_odd_metadata": 0, "duplicate_odd_metadata": 0,
+            "missing_label_data": 0, "zero_obj_count": 0,
+            "negative_obj_count": 0, "non_integer_obj_count": 0,
+            "duplicate_label_class": 0
+        }
     }
     
-    for row in all_rows:
-        s, r_str = row["stage"], row["reason"]
-        overall_stats["by_stage"][s] = overall_stats["by_stage"].get(s, 0) + 1
-        
-        # 복합 사유가 발생하더라도(동일 단계 내 중복 오류) 개별 집계
-        for r in [x.strip() for x in r_str.split("&")]:
-            overall_stats["by_reason"][r] = overall_stats["by_reason"].get(r, 0) + 1
+    for row in all_rejections:
+        overall_stats["by_stage"][row["stage"]] = overall_stats["by_stage"].get(row["stage"], 0) + 1
+        for r in [x.strip() for x in row["reason"].split("&")]:
+            if r in overall_stats["by_reason"]:
+                overall_stats["by_reason"][r] += 1
 
-    # --- [2] Independent Filtering Logic (Smart Toggle) ---
+    # 2. 독립 검색 및 필터 로직 구성
     conditions = ["1=1"]
     params = []
     
-    # Stage 단독 검색 가능
     if stage:
         conditions.append("stage = ?")
         params.append(stage)
     
-    # Reason 단독 검색 가능 (복합 사유 포함)
     if reason:
+        # % 기호를 포함하여 LIKE 검색 수행 (복합 사유 대응)
         conditions.append("reason LIKE ?")
-        params.append(f"%{reason}%")
+        params.append(f"%{reason.strip()}%")
 
     where_clause = " AND ".join(conditions)
 
-    # --- [3] Pagination & Items ---
+    # 3. 데이터 조회 (Count와 Items의 일치 확인)
     cursor.execute(f"SELECT COUNT(*) FROM rejections WHERE {where_clause}", params)
     filtered_total = cursor.fetchone()[0]
 
-    cursor.execute(f"SELECT * FROM rejections WHERE {where_clause} LIMIT ? OFFSET ?", params + [size, (page - 1) * size])
+    # 중요: LIMIT/OFFSET 파라미터는 검색 조건(params) 뒤에 추가되어야 함
+    final_query = f"SELECT * FROM rejections WHERE {where_clause} LIMIT ? OFFSET ?"
+    paging_params = params + [size, (page - 1) * size]
+    
+    cursor.execute(final_query, paging_params)
+    rows = cursor.fetchall()
     
     items = []
-    for row in cursor.fetchall():
+    for row in rows:
         item = dict(row)
         if item.get("raw_data"):
-            try: item["raw_data"] = json.loads(item["raw_data"])
-            except: pass
+            try:
+                item["raw_data"] = json.loads(item["raw_data"])
+            except:
+                pass
         items.append(item)
 
     conn.close()
@@ -399,7 +402,6 @@ def get_rejections(
         },
         "items": items
     }
-
 @app.post("/search", tags=["Search"])
 def search_data(
     filters: dict = Body(..., openapi_examples={
