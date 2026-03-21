@@ -40,27 +40,35 @@ router = APIRouter()
 @app.post("/analyze", tags=["Pipeline"])
 async def analyze():
     """
-    ### ⚙️ 데이터 파이프라인 가동 (Logic Fixed & Multi-Reason Concatenation)
-    - **버그 수정**: 'list' object has no attribute 'empty' 에러를 해결했습니다.
-    - **병합 논리**: Stage 1(ODD)과 Stage 2(Labeling)의 모든 에러를 비디오 ID별로 `&` 결합합니다.
-    - **상세 분석**: zero, negative, non-integer 등 모든 무결성 케이스를 포함합니다.
+    ### 데이터 분석 및 DB 적재 
+    
+    이 엔드포인트는 원본 데이터셋을 전수 조사하여 학습 가용 데이터를 추출하고 오류를 격리합니다.
+    
+    **1. 캡처하는 예외 케이스 (Rejection Cases):**
+    * **Stage 1 (ODD DATA):** 메타데이터 누락(`missing_odd_metadata`).
+    * **Stage 1 (ODD INTEGRITY):** ODD ID 중복(`duplicate_odd_metadata`).
+    * **Stage 2 (LABELING DATA):** 라벨 파일 누락(`missing_label_data`).
+    * **Stage 2 (LABELING INTEGRITY):** 객체 수 0(`zero_obj_count`), 음수(`negative_obj_count`), 실수(`non_integer_obj_count`), 클래스 중복(`duplicate_label_class`).
+    
+    **2. 거부 사유 병합 논리:**
+    * 한 비디오가 여러 단계에서 중복 오류를 가질 경우, `rejections` 테이블에는 `&`로 연결된 단일 문자열로 저장됩니다.
+    * 예: `duplicate_odd_metadata & missing_label_data` (ODD 메타데이터 누락과 라벨 데이터 누락이 동시에 발생한 경우)
+
     """
     if os.path.exists(DB_PATH):
         return {"message": "데이터베이스가 이미 존재합니다. 통합 과정을 건너뜁니다."}
 
     try:
-        # 1. 데이터 로드 및 정규화
+        # [1] 데이터 로드 및 정규화
         selections_raw, odds_df, labels_df = load_all()
         sel_df = normalize_selections(selections_raw)
         all_ids = set(sel_df["video_id"])
 
         # --- STAGE 1: ODD Step ---
-        # 반환값이 리스트일 경우를 대비해 처리 방식 변경
         merged_odds_df, missing_odd_ids, duplicate_odd_ids = merge_selections_with_odds(sel_df, odds_df)
-        
         rejection_frames = []
 
-        # A. Missing ODD (리스트/Series 모두 대응)
+        # A. Missing ODD (List/Series 대응)
         if len(missing_odd_ids) > 0:
             tmp = sel_df[sel_df["video_id"].isin(list(missing_odd_ids))].copy()
             tmp["reason"], tmp["stage"] = "missing_odd_metadata", "odd_tagging_step"
@@ -72,7 +80,7 @@ async def analyze():
             tmp["reason"], tmp["stage"] = "duplicate_odd_metadata", "odd_tagging_step"
             rejection_frames.append(tmp)
 
-        # --- STAGE 2: Labeling Integrity Check (세분화) ---
+        # --- STAGE 2: Labeling Integrity Check ---
         error_map = {}
         for vid, group in labels_df.groupby("video_id"):
             reasons = []
@@ -84,7 +92,6 @@ async def analyze():
             if group.duplicated("object_class").any(): reasons.append("duplicate_label_class")
             
             if reasons:
-                # 개별 라벨 에러들을 이미 &로 결합
                 error_map[vid] = " & ".join(sorted(reasons))
 
         # C. Missing Label
@@ -94,17 +101,17 @@ async def analyze():
             tmp["reason"], tmp["stage"] = "missing_label_data", "auto_labeling_step"
             rejection_frames.append(tmp)
 
-        # D. Integrity Errors (error_map 적용)
+        # D. Integrity Errors (from error_map)
         if error_map:
             tmp = sel_df[sel_df["video_id"].isin(error_map.keys())].copy()
             tmp["reason"] = tmp["video_id"].map(error_map)
             tmp["stage"] = "auto_labeling_step"
             rejection_frames.append(tmp)
 
-        # --- STAGE 4: Final Rejection Aggregation (종합 병합) ---
+        # --- STAGE 3: Final Rejection Aggregation (& Concatenation) ---
         if rejection_frames:
             raw_rejections_df = pd.concat(rejection_frames, ignore_index=True)
-            # 중복 ID를 합치면서 모든 사유를 &로 연결
+            # 중복 ID 통합 및 사유 문자열 병합
             all_rejections_df = raw_rejections_df.groupby("video_id").agg({
                 "reason": lambda x: " & ".join(sorted(set(" & ".join(x).split(" & ")))),
                 "stage": "first",
@@ -113,19 +120,19 @@ async def analyze():
         else:
             all_rejections_df = pd.DataFrame(columns=["video_id", "reason", "stage"])
 
-        # --- DB 저장 및 최종 리포트 ---
+        # --- STAGE 4: DB 저장 및 최종 리포트 생성 ---
         conn = sqlite3.connect(DB_PATH)
         all_rejections_df.to_sql("rejections", conn, if_exists="replace", index=False)
         
         rejected_ids = set(all_rejections_df["video_id"])
-        # 최종 통합 데이터 생성
+        # 불량 ID를 제외한 정상 데이터만 통합
         final_df = merged_odds_df[~merged_odds_df["video_id"].isin(rejected_ids)].merge(labels_df, on="video_id")
         final_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
         
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rej_reason ON rejections(reason)")
         conn.close()
 
-        # 분석 요약 (Reason별 분포)
+        # 분석 요약 통계 계산
         reason_summary = all_rejections_df["reason"].value_counts().to_dict() if not all_rejections_df.empty else {}
 
         return {
@@ -133,8 +140,9 @@ async def analyze():
             "analysis_report": {
                 "total_input": len(sel_df),
                 "integrated_count": len(final_df.video_id.unique()),
-                "total_rejected_unique": len(all_rejections_df),
-                "rejection_detail_summary": reason_summary
+                "integration_rate": f"{(1 - len(all_rejections_df)/len(sel_df))*100:.2f}%",
+                "total_rejections": len(all_rejections_df),
+                "rejection_detail_summary": reason_summary,
             }
         }
 
