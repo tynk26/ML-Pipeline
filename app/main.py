@@ -50,7 +50,7 @@ async def analyze():
     * **Integration Rate:** 전체 입력 대비 최종 통합된 영상의 비율로, 데이터 품질과 정제 효율을 나타냅니다.
     * **Total Rejections:** ODD 매칭 실패, LABELING 누락, 객체 수 오류 등으로 거절된 영상의 총 수입니다.
 
-    **2. 단계별 격리 처리 (Rejection by Stage):**  각 처리 단계(ODD 매칭, 라벨링 검증)별로 거절된 영상 수를 집계하여 어느 단계에서 문제가 발생하는지 파악합니다.
+    **2. 단계별 격리 처리 (Rejection by Stage):** 각 처리 단계(ODD 매칭, 라벨링 검증)별로 거절된 영상 수를 집계하여 어느 단계에서 문제가 발생하는지 파악합니다.
     * 모든 거절 데이터는 발생 지점에 따라 `odd_tagging_step` 또는 `auto_labeling_step`으로 분류되어 기록됩니다.
 
     **3. 캡처하는 예외 케이스 (Rejection By Reason):** 거절 사유별로 집계하여 어떤 유형의 오류가 가장 빈번한지 분석합니다.
@@ -69,35 +69,51 @@ async def analyze():
     * **Label Density Analysis:** 영상당 평균 객체 수를 산출하여 데이터의 복잡도(Complexity)를 파악합니다.
     """
     if os.path.exists(DB_PATH):
-        return {"message": "데이터베이스가 이미 존재합니다. 통합 과정을 건너뜁니다."}
+        return {"message": "데이터베이스가 이미 존재합니다."}
 
     try:
-        # [1] 데이터 로드 및 정규화
         selections_raw, odds_df, labels_df = load_all()
         sel_df = normalize_selections(selections_raw)
-        all_ids = set(sel_df["video_id"])
-
-        # --- STAGE 1: ODD Step (Metadata Integrity) ---
-        merged_odds_df, missing_odd_ids, duplicate_odd_ids = merge_selections_with_odds(sel_df, odds_df)
+        
+        # Waterfall 제어를 위한 생존자 명단
+        current_survivor_ids = set(sel_df["video_id"])
         rejection_frames = []
 
-        if len(missing_odd_ids) > 0:
-            tmp = sel_df[sel_df["video_id"].isin(list(missing_odd_ids))].copy()
+        # --- STAGE 1: ODD Step ---
+        odds_ids = set(odds_df["video_id"])
+        
+        # 1-A. Missing ODD
+        missing_odd_ids = current_survivor_ids - odds_ids
+        if missing_odd_ids:
+            tmp = sel_df[sel_df["video_id"].isin(missing_odd_ids)].copy()
             tmp["reason"], tmp["stage"] = "missing_odd_metadata", "odd_tagging_step"
-            rejection_frames.append(tmp)
+            rejection_frames.append(tmp[["video_id", "stage", "reason", "raw_data"]]) # 필요한 컬럼만 추출
+            current_survivor_ids -= missing_odd_ids
 
-        if len(duplicate_odd_ids) > 0:
-            tmp = sel_df[sel_df["video_id"].isin(list(duplicate_odd_ids))].copy()
+        # 1-B. Duplicate ODD
+        duplicate_odd_ids = set(odds_df[odds_df.duplicated("video_id")]["video_id"]) & current_survivor_ids
+        if duplicate_odd_ids:
+            tmp = sel_df[sel_df["video_id"].isin(duplicate_odd_ids)].copy()
             tmp["reason"], tmp["stage"] = "duplicate_odd_metadata", "odd_tagging_step"
-            rejection_frames.append(tmp)
+            rejection_frames.append(tmp[["video_id", "stage", "reason", "raw_data"]])
+            current_survivor_ids -= duplicate_odd_ids
 
-        # --- STAGE 2: Labeling Integrity Check (Detailed Errors) ---
+        # --- STAGE 2: Labeling Step ---
+        # 2-A. Missing Label
+        labels_ids = set(labels_df["video_id"])
+        missing_label_ids = current_survivor_ids - labels_ids
+        if missing_label_ids:
+            tmp = sel_df[sel_df["video_id"].isin(missing_label_ids)].copy()
+            tmp["reason"], tmp["stage"] = "missing_label_data", "auto_labeling_step"
+            rejection_frames.append(tmp[["video_id", "stage", "reason", "raw_data"]])
+            current_survivor_ids -= missing_label_ids
+
+        # 2-B. Labeling Integrity
+        survivor_labels = labels_df[labels_df["video_id"].isin(current_survivor_ids)]
         error_map = {}
-        for vid, group in labels_df.groupby("video_id"):
+        for vid, group in survivor_labels.groupby("video_id"):
             reasons = []
-            total_obj = group["obj_count"].sum()
-            
-            if total_obj == 0: reasons.append("zero_obj_count")
+            if group["obj_count"].sum() == 0: reasons.append("zero_obj_count")
             if (group["obj_count"] < 0).any(): reasons.append("negative_obj_count")
             if (group["obj_count"] % 1 != 0).any(): reasons.append("non_integer_obj_count")
             if group.duplicated("object_class").any(): reasons.append("duplicate_label_class")
@@ -105,53 +121,41 @@ async def analyze():
             if reasons:
                 error_map[vid] = " & ".join(sorted(reasons))
 
-        # C. Missing Label
-        missing_label_ids = all_ids - set(labels_df["video_id"])
-        if missing_label_ids:
-            tmp = sel_df[sel_df["video_id"].isin(list(missing_label_ids))].copy()
-            tmp["reason"], tmp["stage"] = "missing_label_data", "auto_labeling_step"
-            rejection_frames.append(tmp)
-
-        # D. Integrity Errors
         if error_map:
             tmp = sel_df[sel_df["video_id"].isin(error_map.keys())].copy()
             tmp["reason"] = tmp["video_id"].map(error_map)
             tmp["stage"] = "auto_labeling_step"
-            rejection_frames.append(tmp)
+            rejection_frames.append(tmp[["video_id", "stage", "reason", "raw_data"]])
+            current_survivor_ids -= set(error_map.keys())
 
-        # --- STAGE 3: Final Aggregation & DB Store ---
-        if rejection_frames:
-            raw_rejections_df = pd.concat(rejection_frames, ignore_index=True)
-            all_rejections_df = raw_rejections_df.groupby("video_id").agg({
-                "reason": lambda x: " & ".join(sorted(set(" & ".join(x).split(" & ")))),
-                "stage": "first",
-                "raw_data": "first" if "raw_data" in raw_rejections_df.columns else lambda x: None
-            }).reset_index()
-        else:
-            all_rejections_df = pd.DataFrame(columns=["video_id", "reason", "stage"])
-
+        # --- STAGE 3: DB 적재 (Minimal Columns) ---
         conn = sqlite3.connect(DB_PATH)
-        all_rejections_df.to_sql("rejections", conn, if_exists="replace", index=False)
         
-        rejected_ids = set(all_rejections_df["video_id"])
-        # 최종 통합 (학습 효율을 위한 1:N 역정규화 구조)
-        final_df = merged_odds_df[~merged_odds_df["video_id"].isin(rejected_ids)].merge(labels_df, on="video_id")
+        if rejection_frames:
+            # Waterfall에 의해 중복이 제거되었으므로 단순 병합
+            all_rejections_df = pd.concat(rejection_frames, ignore_index=True)
+            # 최종 확인: video_id, stage, reason, raw_data 4개 컬럼만 저장
+            all_rejections_df.to_sql("rejections", conn, if_exists="replace", index=False)
+        else:
+            # 데이터가 없을 경우 스키마만 생성
+            pd.DataFrame(columns=["video_id", "stage", "reason", "raw_data"]).to_sql("rejections", conn, if_exists="replace", index=False)
+
+        # Integrated Data 저장 (ODD + Labels 합본)
+        final_df = odds_df[odds_df["video_id"].isin(current_survivor_ids)].merge(labels_df, on="video_id")
         final_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
         
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_rej_reason ON rejections(reason)")
         conn.close()
 
         # --- STAGE 4: ML Pipeline Augmented Analysis ---
         unique_final_vids = final_df.drop_duplicates('video_id')
         total_vids_count = len(unique_final_vids)
 
-        # 1. 클래스별 포함 영상 비율 (Sparsity & Background Bias Detection)
         class_presence = {}
-        for cls in final_df['object_class'].unique():
-            presence_count = final_df[final_df['object_class'] == cls]['video_id'].nunique()
-            class_presence[cls] = f"{(presence_count / total_vids_count) * 100:.2f}%"
+        if total_vids_count > 0:
+            for cls in final_df['object_class'].unique():
+                presence_count = final_df[final_df['object_class'] == cls]['video_id'].nunique()
+                class_presence[cls] = f"{(presence_count / total_vids_count) * 100:.2f}%"
 
-        # 2. 장면 복잡도 분포 (Scene Complexity Distribution)
         obj_counts_per_vid = final_df.groupby('video_id')['obj_count'].sum()
         complexity_stats = {
             "low_complexity (1-5 objects)": int((obj_counts_per_vid <= 5).sum()),
@@ -159,11 +163,9 @@ async def analyze():
             "high_complexity (16+ objects)": int((obj_counts_per_vid > 15).sum())
         }
 
-        # 3. 환경 조합 교차 분석 (Critical Scenario Mapping)
         env_combos = unique_final_vids.groupby(['weather', 'time_of_day']).size().to_dict()
         formatted_combos = {f"{k[0]} | {k[1]}": v for k, v in env_combos.items()}
 
-        # 4. 기본 분포 비율 (%)
         weather_pct = unique_final_vids['weather'].value_counts(normalize=True).mul(100).round(2).to_dict()
         tod_pct = unique_final_vids['time_of_day'].value_counts(normalize=True).mul(100).round(2).to_dict()
 
@@ -402,6 +404,7 @@ def get_rejections(
         },
         "items": items
     }
+
 @app.post("/search", tags=["Search"])
 def search_data(
     filters: dict = Body(..., openapi_examples={
