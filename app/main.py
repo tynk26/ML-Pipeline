@@ -132,23 +132,23 @@ def get_rejections(
         description="해당 단계에 발생하는 구체적인 사유",
         openapi_examples={
             "ODD: Missing Metadata": {
-                "summary": "[ODD 전용] 데이터 없음",
+                "summary": "[ODD 전용] ODD 데이터 없음",
                 "value": "missing_odd_metadata"
             },
             "ODD: Duplicate ID": {
-                "summary": "[ODD 전용] 중복된 비디오 ID",
+                "summary": "[ODD 전용] 중복된 ODD 비디오 ID",
                 "value": "duplicate_odd_metadata"
             },
             "Label: Missing Labels": {
-                "summary": "[Labeling 전용] 라벨링 데이터 없음",
+                "summary": "[Labeling 전용] LABELING 데이터 없음",
                 "value": "missing_label_data"
             },
             "Label: Car Duplicates": {
-                "summary": "[Labeling 전용] label object 중복",
+                "summary": "[Labeling 전용] LABELING object 중복",
                 "value": "duplicate_label"
             },
             "Label: Pedestrian Negatives": {
-                "summary": "[Labeling 전용] label object 음수 오류",
+                "summary": "[Labeling 전용] LABELING object 음수 오류",
                 "value": "negative_obj_count"
             }
         }
