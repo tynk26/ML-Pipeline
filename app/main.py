@@ -40,22 +40,37 @@ router = APIRouter()
 @app.post("/analyze", tags=["Pipeline"])
 async def analyze():
     """
-    ### 데이터 분석 및 DB 적재 (Logic Fixed & Stage-Aware)
+    ### 데이터 분석 및 DB 적재 
     
-    이 엔드포인트는 원본 데이터셋을 전수 조사하여 학습 가용 데이터를 추출하고 오류를 격리합니다.
+    이 엔드포인트는 원본 데이터셋을 전수 조사하여 학습 가용 데이터를 추출하고 품질 미달 및 오류 대이터를 격리합니다.
     
-    **1. 캡처하는 예외 케이스 (Rejection Cases):**
+    **1. 데이터 통합 및 정제 요약 (Processing Summary):**
+    * **전체 입력 데이터 중 결함을 걸러내고 최종 학습에 투입 가능한 유효 데이터의 총량과 정제 효율을 정량적으로 증명하는 지표입니다.**
+    * **Total Input Videos:** 원본 데이터셋에 존재하는 총 영상 수입니다.
+    * **Integrated Videos:** ODD와 라벨링 데이터가 모두 존재하고, 라벨링 무결성 검사를 통과한 최종 학습용 영상 수입니다.
+    * **Integration Rate:** 전체 입력 대비 최종 통합된 영상의 비율로, 데이터 품질과 정제 효율을 나타냅니다.
+    * **Total Rejections:** ODD 매칭 실패, 라벨링 누락, 객체 수 오류 등으로 거절된 영상의 총 수입니다.
+    * **Rejection by Stage:** 각 처리 단계(ODD 매칭, 라벨링 검증)별로 거절된 영상 수를 집계하여 어느 단계에서 문제가 발생하는지 파악합니다.
+    * **Rejection by Reason:** 거절 사유별로 집계하여 어떤 유형의 오류가 가장 빈번한지 분석합니다.
+
+    **2. 단계별 격리 처리 (Rejection by Stage):**
+    * 모든 거절 데이터는 발생 지점에 따라 `odd_tagging_step` 또는 `auto_labeling_step`으로 분류되어 기록됩니다.
+
+    **3. 캡처하는 예외 케이스 (Rejection By Reason):**
     * **Stage 1 (ODD DATA):** 메타데이터 누락(`missing_odd_metadata`).
     * **Stage 1 (ODD INTEGRITY):** ODD ID 중복(`duplicate_odd_metadata`).
     * **Stage 2 (LABELING DATA):** 라벨 파일 누락(`missing_label_data`).
     * **Stage 2 (LABELING INTEGRITY):** 객체 수 0(`zero_obj_count`), 음수(`negative_obj_count`), 실수(`non_integer_obj_count`), 클래스 중복(`duplicate_label_class`).
     
-    **2. 거부 사유 병합 논리:**
+    **4. 거부 사유 병합 논리:**
     * 한 비디오가 여러 단계에서 중복 오류를 가질 경우, `rejections` 테이블에는 `&`로 연결된 단일 문자열로 저장됩니다.
     * 예: `duplicate_odd_metadata & missing_label_data`
     
-    **3. 단계별 격리 처리 (Stage Tracking):**
-    * 모든 거절 데이터는 발생 지점에 따라 `odd_tagging_step` 또는 `auto_labeling_step`으로 분류되어 기록됩니다.
+    **5. 통계 분석 (Statistical Report):**
+    * **Label Class Distribution:** 각 객체 클래스가 전체 영상 중 몇 퍼센트의 영상에 출현하는지 분석합니다. 특정 배경에만 객체가 편중되어 학습되는 '배경 편향성'을 탐지하는 데 사용됩니다.
+    * **Scene Complexity Distribution:** 영상 내 총 객체 수를 기준으로 저/중/고밀도 상황을 분류합니다. 모델이 혼잡한 환경에서 성능이 얼마나 유지되는지 테스트하기 위한 벤치마크 데이터셋 구성의 근거가 됩니다.
+    * **Environment Report:** 기상, 시간대, 노면 상태별 비중(%)을 계산하여 학습 데이터의 편향성을 수치화합니다.
+    * **Label Density Analysis:** 영상당 평균 객체 수를 산출하여 데이터의 복잡도(Complexity)를 파악합니다.
     """
     if os.path.exists(DB_PATH):
         return {"message": "데이터베이스가 이미 존재합니다. 통합 과정을 건너뜁니다."}
@@ -66,23 +81,21 @@ async def analyze():
         sel_df = normalize_selections(selections_raw)
         all_ids = set(sel_df["video_id"])
 
-        # --- STAGE 1: ODD Step ---
+        # --- STAGE 1: ODD Step (Metadata Integrity) ---
         merged_odds_df, missing_odd_ids, duplicate_odd_ids = merge_selections_with_odds(sel_df, odds_df)
         rejection_frames = []
 
-        # A. Missing ODD (List/Series 대응)
         if len(missing_odd_ids) > 0:
             tmp = sel_df[sel_df["video_id"].isin(list(missing_odd_ids))].copy()
             tmp["reason"], tmp["stage"] = "missing_odd_metadata", "odd_tagging_step"
             rejection_frames.append(tmp)
 
-        # B. Duplicate ODD
         if len(duplicate_odd_ids) > 0:
             tmp = sel_df[sel_df["video_id"].isin(list(duplicate_odd_ids))].copy()
             tmp["reason"], tmp["stage"] = "duplicate_odd_metadata", "odd_tagging_step"
             rejection_frames.append(tmp)
 
-        # --- STAGE 2: Labeling Integrity Check ---
+        # --- STAGE 2: Labeling Integrity Check (Detailed Errors) ---
         error_map = {}
         for vid, group in labels_df.groupby("video_id"):
             reasons = []
@@ -103,50 +116,81 @@ async def analyze():
             tmp["reason"], tmp["stage"] = "missing_label_data", "auto_labeling_step"
             rejection_frames.append(tmp)
 
-        # D. Integrity Errors (from error_map)
+        # D. Integrity Errors
         if error_map:
             tmp = sel_df[sel_df["video_id"].isin(error_map.keys())].copy()
             tmp["reason"] = tmp["video_id"].map(error_map)
             tmp["stage"] = "auto_labeling_step"
             rejection_frames.append(tmp)
 
-        # --- STAGE 3: Final Rejection Aggregation (& Concatenation) ---
+        # --- STAGE 3: Final Aggregation & DB Store ---
         if rejection_frames:
             raw_rejections_df = pd.concat(rejection_frames, ignore_index=True)
-            # 중복 ID 통합 및 사유 문자열 병합
             all_rejections_df = raw_rejections_df.groupby("video_id").agg({
                 "reason": lambda x: " & ".join(sorted(set(" & ".join(x).split(" & ")))),
-                "stage": "first", # 병합 시 최초 발견된 단계를 우선 기록
+                "stage": "first",
                 "raw_data": "first" if "raw_data" in raw_rejections_df.columns else lambda x: None
             }).reset_index()
         else:
             all_rejections_df = pd.DataFrame(columns=["video_id", "reason", "stage"])
 
-        # --- STAGE 4: DB 저장 및 최종 리포트 생성 ---
         conn = sqlite3.connect(DB_PATH)
         all_rejections_df.to_sql("rejections", conn, if_exists="replace", index=False)
         
         rejected_ids = set(all_rejections_df["video_id"])
-        # 불량 ID를 제외한 정상 데이터만 통합
+        # 최종 통합 (학습 효율을 위한 1:N 역정규화 구조)
         final_df = merged_odds_df[~merged_odds_df["video_id"].isin(rejected_ids)].merge(labels_df, on="video_id")
         final_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
         
         conn.execute("CREATE INDEX IF NOT EXISTS idx_rej_reason ON rejections(reason)")
         conn.close()
 
-        # 분석 요약 통계 계산
-        reason_summary = all_rejections_df["reason"].value_counts().to_dict() if not all_rejections_df.empty else {}
-        stage_summary = all_rejections_df["stage"].value_counts().to_dict() if not all_rejections_df.empty else {}
+        # --- STAGE 4: ML Pipeline Augmented Analysis ---
+        unique_final_vids = final_df.drop_duplicates('video_id')
+        total_vids_count = len(unique_final_vids)
+
+        # 1. 클래스별 포함 영상 비율 (Sparsity & Background Bias Detection)
+        class_presence = {}
+        for cls in final_df['object_class'].unique():
+            presence_count = final_df[final_df['object_class'] == cls]['video_id'].nunique()
+            class_presence[cls] = f"{(presence_count / total_vids_count) * 100:.2f}%"
+
+        # 2. 장면 복잡도 분포 (Scene Complexity Distribution)
+        obj_counts_per_vid = final_df.groupby('video_id')['obj_count'].sum()
+        complexity_stats = {
+            "low_complexity (1-5 objects)": int((obj_counts_per_vid <= 5).sum()),
+            "mid_complexity (6-15 objects)": int(((obj_counts_per_vid > 5) & (obj_counts_per_vid <= 15)).sum()),
+            "high_complexity (16+ objects)": int((obj_counts_per_vid > 15).sum())
+        }
+
+        # 3. 환경 조합 교차 분석 (Critical Scenario Mapping)
+        env_combos = unique_final_vids.groupby(['weather', 'time_of_day']).size().to_dict()
+        formatted_combos = {f"{k[0]} | {k[1]}": v for k, v in env_combos.items()}
+
+        # 4. 기본 분포 비율 (%)
+        weather_pct = unique_final_vids['weather'].value_counts(normalize=True).mul(100).round(2).to_dict()
+        tod_pct = unique_final_vids['time_of_day'].value_counts(normalize=True).mul(100).round(2).to_dict()
 
         return {
             "status": "success",
             "analysis_report": {
-                "total_input": len(sel_df),
-                "integrated_count": len(final_df.video_id.unique()),
-                "integration_rate": f"{(1 - len(all_rejections_df)/len(sel_df))*100:.2f}%",
+                "total_input_videos": len(sel_df),
+                "integrated_videos": total_vids_count,
+                "integration_rate": f"{(total_vids_count/len(sel_df))*100:.2f}%",
                 "total_rejections": len(all_rejections_df),
-                "rejection_by_stage": stage_summary,
-                "rejection_detail_summary": reason_summary,
+                "rejection_by_stage": all_rejections_df["stage"].value_counts().to_dict() if not all_rejections_df.empty else {},
+                "rejection_by_reason": all_rejections_df["reason"].value_counts().to_dict() if not all_rejections_df.empty else {},
+                "statistical_report": {
+                    "object_class_frequency": final_df['object_class'].value_counts().to_dict(),
+                    "label_class_distribution": class_presence,
+                    "scene_complexity_distribution": complexity_stats,
+                    "environment_report": {
+                        "weather_distribution": weather_pct,
+                        "time_of_day_distribution": tod_pct,
+                        "scenario_distribution": formatted_combos
+                    },
+                    "avg_labels_per_video": round(len(final_df) / total_vids_count, 2) if total_vids_count > 0 else 0
+                }
             }
         }
 
