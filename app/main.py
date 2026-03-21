@@ -42,31 +42,27 @@ async def analyze():
     """
     ### 데이터 분석 및 DB 적재 
     
-    이 엔드포인트는 원본 데이터셋을 전수 조사하여 학습 가용 데이터를 추출하고 품질 미달 및 오류 대이터를 격리합니다.
+    ### 이 엔드포인트는 원본 데이터셋을 전수 조사하여 학습 가용 데이터를 추출하고 품질 미달 및 오류 데이터를 격리합니다.
     
-    **1. 데이터 통합 및 정제 요약 (Processing Summary):**
-    * **전체 입력 데이터 중 결함을 걸러내고 최종 학습에 투입 가능한 유효 데이터의 총량과 정제 효율을 정량적으로 증명하는 지표입니다.**
+    **1. 데이터 통합 및 정제 요약 (Processing Summary):** 전체 입력 데이터 중 결함을 걸러내고 최종 학습에 투입 가능한 유효 데이터의 총량과 정제 효율을 정량적으로 증명하는 지표입니다.**
     * **Total Input Videos:** 원본 데이터셋에 존재하는 총 영상 수입니다.
-    * **Integrated Videos:** ODD와 라벨링 데이터가 모두 존재하고, 라벨링 무결성 검사를 통과한 최종 학습용 영상 수입니다.
+    * **Integrated Videos:** ODD와 LABELING데이터가 모두 존재하고, 데이터 무결성 검사를 통과한 최종 학습용 영상 수입니다.
     * **Integration Rate:** 전체 입력 대비 최종 통합된 영상의 비율로, 데이터 품질과 정제 효율을 나타냅니다.
-    * **Total Rejections:** ODD 매칭 실패, 라벨링 누락, 객체 수 오류 등으로 거절된 영상의 총 수입니다.
-    * **Rejection by Stage:** 각 처리 단계(ODD 매칭, 라벨링 검증)별로 거절된 영상 수를 집계하여 어느 단계에서 문제가 발생하는지 파악합니다.
-    * **Rejection by Reason:** 거절 사유별로 집계하여 어떤 유형의 오류가 가장 빈번한지 분석합니다.
+    * **Total Rejections:** ODD 매칭 실패, LABELING 누락, 객체 수 오류 등으로 거절된 영상의 총 수입니다.
 
-    **2. 단계별 격리 처리 (Rejection by Stage):**
+    **2. 단계별 격리 처리 (Rejection by Stage):**  각 처리 단계(ODD 매칭, 라벨링 검증)별로 거절된 영상 수를 집계하여 어느 단계에서 문제가 발생하는지 파악합니다.
     * 모든 거절 데이터는 발생 지점에 따라 `odd_tagging_step` 또는 `auto_labeling_step`으로 분류되어 기록됩니다.
 
-    **3. 캡처하는 예외 케이스 (Rejection By Reason):**
+    **3. 캡처하는 예외 케이스 (Rejection By Reason):** 거절 사유별로 집계하여 어떤 유형의 오류가 가장 빈번한지 분석합니다.
     * **Stage 1 (ODD DATA):** 메타데이터 누락(`missing_odd_metadata`).
     * **Stage 1 (ODD INTEGRITY):** ODD ID 중복(`duplicate_odd_metadata`).
     * **Stage 2 (LABELING DATA):** 라벨 파일 누락(`missing_label_data`).
     * **Stage 2 (LABELING INTEGRITY):** 객체 수 0(`zero_obj_count`), 음수(`negative_obj_count`), 실수(`non_integer_obj_count`), 클래스 중복(`duplicate_label_class`).
     
-    **4. 거부 사유 병합 논리:**
-    * 한 비디오가 여러 단계에서 중복 오류를 가질 경우, `rejections` 테이블에는 `&`로 연결된 단일 문자열로 저장됩니다.
+    **4. 거부 사유 병합 논리:** 한 비디오가 여러 단계에서 중복 오류를 가질 경우, `rejections` 테이블에는 `&`로 연결된 단일 문자열로 저장됩니다.
     * 예: `duplicate_odd_metadata & missing_label_data`
     
-    **5. 통계 분석 (Statistical Report):**
+    **5. 통계 분석 (Statistical Report):** 최종 통합된 데이터셋에 대한 통계 분석을 통해 학습 데이터의 특성과 편향성을 파악합니다.
     * **Label Class Distribution:** 각 객체 클래스가 전체 영상 중 몇 퍼센트의 영상에 출현하는지 분석합니다. 특정 배경에만 객체가 편중되어 학습되는 '배경 편향성'을 탐지하는 데 사용됩니다.
     * **Scene Complexity Distribution:** 영상 내 총 객체 수를 기준으로 저/중/고밀도 상황을 분류합니다. 모델이 혼잡한 환경에서 성능이 얼마나 유지되는지 테스트하기 위한 벤치마크 데이터셋 구성의 근거가 됩니다.
     * **Environment Report:** 기상, 시간대, 노면 상태별 비중(%)을 계산하여 학습 데이터의 편향성을 수치화합니다.
