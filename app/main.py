@@ -104,6 +104,7 @@ async def analyze():
         if os.path.exists(DB_PATH): 
             os.remove(DB_PATH)
         raise HTTPException(status_code=500, detail=f"Pipeline Failure: {str(e)}")
+    
 @app.get("/rejections")
 def get_rejections(
     stage: Optional[str] = Query(
@@ -125,7 +126,7 @@ def get_rejections(
         description="해당 단계에 발생하는 구체적인 사유",
         openapi_examples={
             "ODD: Missing Metadata": {
-                "summary": "[ODD 전용] 메타데이터 누락",
+                "summary": "[ODD 전용] 데이터 없음",
                 "value": "missing_odd_metadata"
             },
             "ODD: Duplicate ID": {
@@ -137,12 +138,12 @@ def get_rejections(
                 "value": "missing_label_data"
             },
             "Label: Car Duplicates": {
-                "summary": "[Labeling 전용] 차량 라벨 중복",
-                "value": "duplicate_label: car"
+                "summary": "[Labeling 전용] label object 중복",
+                "value": "duplicate_label"
             },
             "Label: Pedestrian Negatives": {
-                "summary": "[Labeling 전용] 보행자 수 음수 오류",
-                "value": "negative_obj_count: pedestrian"
+                "summary": "[Labeling 전용] label object 음수 오류",
+                "value": "negative_obj_count"
             }
         }
     ), 
