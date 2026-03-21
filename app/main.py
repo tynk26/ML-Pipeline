@@ -12,17 +12,34 @@ from app.preprocessing.preprocessing import (
     merge_with_labels
 )
 
-app = FastAPI(title="ML Data SQL API")
+# API 문서의 메타데이터 설정
+app = FastAPI(
+    title="🚗 자율주행 학습 데이터 통합 및 검증 API",
+    description="""
+    본 API는 자율주행 차량 센서 데이터(ODD)와 객체 인식 결과(Labels)를 통합하고, 
+    데이터 무결성을 검증하여 최적의 학습셋을 구축하는 시스템입니다.
+    
+    ### 주요 기능:
+    * **데이터 파이프라인 (/analyze)**: 원본 데이터를 정제하여 통합 DB 구축
+    * **거절 데이터 관리 (/rejections)**: 중복, 음수, 누락 등 오류 데이터 추적 및 필터링
+    * **정밀 검색 (/search)**: 다양한 환경 조건과 객체 카운트 기반의 샌드위치 검색
+    """,
+    version="1.0.0"
+)
+
 DB_PATH = "ml_data.db"
 
-@app.post("/analyze")
+@app.post("/analyze", tags=["Pipeline"])
 async def analyze():
     """
-    Strict Data Pipeline with categorization for rejections.
-    Stages: odd_tagging_step, auto_labeling_step
+    ### ⚙️ 데이터 파이프라인 가동 (Ingestion & Cleaning)
+    1. 원본 JSON 및 CSV 데이터를 로드하고 정규화합니다.
+    2. **1단계(ODD)**: 메타데이터 누락 및 비디오 ID 중복 여부를 체크하여 거절합니다.
+    3. **2단계(Labeling)**: 객체 수의 음수/실수 여부, 클래스 중복을 체크하여 거절합니다.
+    4. 정상 데이터는 `integrated_data` 테이블에, 오류 데이터는 `rejections` 테이블에 저장합니다.
     """
     if os.path.exists(DB_PATH):
-        return {"message": "Database already exists. Ingestion skipped."}
+        return {"message": "데이터베이스가 이미 존재합니다. 통합 과정을 건너뜁니다."}
 
     try:
         # 1. Load and Normalize
@@ -37,7 +54,7 @@ async def analyze():
         rejection_missing_odds["reason"] = "missing_odd_metadata"
         rejection_missing_odds["stage"] = "odd_tagging_step"
 
-        # B. REJECTION: Duplicate ODD Metadata (e.g., ID 4938)
+        # B. REJECTION: Duplicate ODD Metadata
         rejection_duplicates = selections_df[selections_df["video_id"].isin(duplicate_odd_ids)].copy()
         rejection_duplicates["reason"] = "duplicate_odd_metadata"
         rejection_duplicates["stage"] = "odd_tagging_step"
@@ -62,22 +79,14 @@ async def analyze():
         all_rejections_df = pd.concat([f for f in frames if not f.empty], ignore_index=True)
         
         # --- GENERATE SUMMARY STATS ---
-        # This creates a dictionary of counts per stage and reason
         rejection_summary = {}
         if not all_rejections_df.empty:
-            # Summary by Stage
             stage_counts = all_rejections_df["stage"].value_counts().to_dict()
-            # Summary by Reason
             reason_counts = all_rejections_df["reason"].value_counts().to_dict()
-            
-            rejection_summary = {
-                "by_stage": stage_counts,
-                "by_reason": reason_counts
-            }
+            rejection_summary = {"by_stage": stage_counts, "by_reason": reason_counts}
 
         # --- SAVE TO DATABASE ---
         conn = sqlite3.connect(DB_PATH)
-        
         if not all_rejections_df.empty:
             save_cols = ["video_id", "reason", "stage", "raw_data"]
             existing = [c for c in save_cols if c in all_rejections_df.columns]
@@ -93,18 +102,15 @@ async def analyze():
 
         return {
             "status": "success", 
-            "counts": {
-                "integrated": len(final_df), 
-                "total_rejected": len(all_rejections_df)
-            },
+            "counts": {"integrated": len(final_df), "total_rejected": len(all_rejections_df)},
             "rejection_breakdown": rejection_summary
         }
 
     except Exception as e:
-        if os.path.exists(DB_PATH): 
-            os.remove(DB_PATH)
+        if os.path.exists(DB_PATH): os.remove(DB_PATH)
         raise HTTPException(status_code=500, detail=f"Pipeline Failure: {str(e)}")
-    
+
+  
 @app.get("/rejections")
 def get_rejections(
     stage: Optional[str] = Query(
@@ -208,36 +214,35 @@ def get_rejections(
         "items": rows
     }
 
-@app.post("/search")
+
+@app.post("/search", tags=["Search"])
 def search_data(
     filters: dict = Body(
         ...,
         openapi_examples={
-            "full_video_3_profile": {
-                "summary": "Full Search Profile: Video ID 3",
+            "Video_3_Sample": {
+                "summary": "복합 검색 예시 (비디오 ID 3번 환경)",
+                "description": "맑은 날, 밤, 건조한 노면, 차량 31대 등의 조건을 모두 만족하는 데이터를 찾습니다.",
                 "value": {
-                    "video_id_min": 3,
-                    "video_id_max": 3,
-                    "recorded_at_min": "2026-01-10",
-                    "weather": "sunny",
-                    "time_of_day": "night",
-                    "road_surface": "dry",
-                    "temperature_fahrenheit_min": 58,
-                    "temperature_fahrenheit_max": 59,
-                    "wiper_on": 1,
-                    "headlights_on": 1,
-                    "wiper_level_min": 3,
-                    "wiper_level_max": 3,
-                    "label_car_min": 31,
-                    "label_car_max": 31,
-                    "label_pedestrian_min": 11
+                    "video_id_min": 3, "video_id_max": 3,
+                    "weather": "sunny", "time_of_day": "night", "road_surface": "dry",
+                    "wiper_on": 1, "headlights_on": 1,
+                    "wiper_level_min": 3, "wiper_level_max": 3,
+                    "label_car_min": 31, "label_car_max": 31, "label_pedestrian_min": 11
                 }
             }
         }
     )
 ):
+    """
+    ### 🔍 정밀 시나리오 검색 (Sandwich Search)
+    환경 조건(날씨, 시간 등)과 객체 인식 결과를 조합하여 최적의 데이터를 추출합니다.
+    
+    * **직접 일치**: `weather`, `time_of_day`, `road_surface`, `headlights_on`, `wiper_on`
+    * **범위 검색**: `_min` 및 `_max` 접미사를 사용하여 수치형 데이터 필터링 가능
+    """
     if not os.path.exists(DB_PATH):
-        raise HTTPException(status_code=503, detail="DB not initialized.")
+        raise HTTPException(status_code=503, detail="DB가 초기화되지 않았습니다. /analyze를 먼저 실행하세요.")
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -246,7 +251,7 @@ def search_data(
     query = "SELECT * FROM integrated_data WHERE 1=1"
     params = []
 
-    # --- 1. DIRECT MATCHES (Case-Insensitive) ---
+    # 1. DIRECT MATCHES
     direct_cols = ["weather", "time_of_day", "road_surface", "headlights_on", "wiper_on"]
     for col in direct_cols:
         if col in filters and filters[col] is not None and filters[col] != "":
@@ -262,17 +267,14 @@ def search_data(
                 query += f" AND LOWER({col}) = LOWER(?)"
                 params.append(str(val))
 
-    # Partial Path
     if "source_path" in filters and filters["source_path"]:
         query += " AND source_path LIKE ?"
         params.append(f"%{filters['source_path']}%")
 
-    # --- 2. NUMERIC & DATE SANDWICHES ---
+    # 2. RANGE MATCHES
     range_fields = ["video_id", "id", "temperature_fahrenheit", "temperature_celsius", "wiper_level", "recorded_at"]
-
     for key, val in filters.items():
         if val is None or val == "": continue
-        
         target_col = None
         if key.startswith("label_"):
             obj = key.replace("label_", "").replace("_min", "").replace("_max", "")
@@ -280,38 +282,32 @@ def search_data(
         else:
             for field in range_fields:
                 if key.startswith(field):
-                    target_col = field
-                    break
-        
+                    target_col = field; break
         if target_col:
-            # Casting for comparison
             try:
                 clean_val = val if target_col == "recorded_at" else float(val)
                 if key.endswith("_min"):
-                    query += f" AND {target_col} >= ?"
-                    params.append(clean_val)
+                    query += f" AND {target_col} >= ?"; params.append(clean_val)
                 elif key.endswith("_max"):
-                    query += f" AND {target_col} <= ?"
-                    params.append(clean_val)
-            except ValueError:
-                continue
+                    query += f" AND {target_col} <= ?"; params.append(clean_val)
+            except ValueError: continue
 
     try:
         cursor.execute(query, params)
         rows = [dict(row) for row in cursor.fetchall()]
         for r in rows:
-            if r.get("labels"):
-                r["labels"] = json.loads(r["labels"])
+            if r.get("labels"): r["labels"] = json.loads(r["labels"])
     except Exception as e:
         conn.close()
-        raise HTTPException(status_code=500, detail=f"Search Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
 
     conn.close()
     return {"total_found": len(rows), "results": rows}
 
-@app.get("/joined_data")
+@app.get("/joined_data", tags=["View"])
 def get_joined_data():
-    if not os.path.exists(DB_PATH): raise HTTPException(status_code=503, detail="DB not initialized.")
+    """### 📂 통합 데이터 미리보기 (Top 50)"""
+    if not os.path.exists(DB_PATH): raise HTTPException(status_code=503, detail="DB 초기화 필요")
     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     cursor.execute("SELECT * FROM integrated_data LIMIT 50")
