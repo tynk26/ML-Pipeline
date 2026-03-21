@@ -40,7 +40,7 @@ router = APIRouter()
 @app.post("/analyze", tags=["Pipeline"])
 async def analyze():
     """
-    ### 데이터 분석 및 DB 적재 
+    ### 데이터 분석 및 DB 적재 (Logic Fixed & Stage-Aware)
     
     이 엔드포인트는 원본 데이터셋을 전수 조사하여 학습 가용 데이터를 추출하고 오류를 격리합니다.
     
@@ -52,8 +52,10 @@ async def analyze():
     
     **2. 거부 사유 병합 논리:**
     * 한 비디오가 여러 단계에서 중복 오류를 가질 경우, `rejections` 테이블에는 `&`로 연결된 단일 문자열로 저장됩니다.
-    * 예: `duplicate_odd_metadata & missing_label_data` (ODD 메타데이터 누락과 라벨 데이터 누락이 동시에 발생한 경우)
-
+    * 예: `duplicate_odd_metadata & missing_label_data`
+    
+    **3. 단계별 격리 처리 (Stage Tracking):**
+    * 모든 거절 데이터는 발생 지점에 따라 `odd_tagging_step` 또는 `auto_labeling_step`으로 분류되어 기록됩니다.
     """
     if os.path.exists(DB_PATH):
         return {"message": "데이터베이스가 이미 존재합니다. 통합 과정을 건너뜁니다."}
@@ -114,7 +116,7 @@ async def analyze():
             # 중복 ID 통합 및 사유 문자열 병합
             all_rejections_df = raw_rejections_df.groupby("video_id").agg({
                 "reason": lambda x: " & ".join(sorted(set(" & ".join(x).split(" & ")))),
-                "stage": "first",
+                "stage": "first", # 병합 시 최초 발견된 단계를 우선 기록
                 "raw_data": "first" if "raw_data" in raw_rejections_df.columns else lambda x: None
             }).reset_index()
         else:
@@ -134,6 +136,7 @@ async def analyze():
 
         # 분석 요약 통계 계산
         reason_summary = all_rejections_df["reason"].value_counts().to_dict() if not all_rejections_df.empty else {}
+        stage_summary = all_rejections_df["stage"].value_counts().to_dict() if not all_rejections_df.empty else {}
 
         return {
             "status": "success",
@@ -142,6 +145,7 @@ async def analyze():
                 "integrated_count": len(final_df.video_id.unique()),
                 "integration_rate": f"{(1 - len(all_rejections_df)/len(sel_df))*100:.2f}%",
                 "total_rejections": len(all_rejections_df),
+                "rejection_by_stage": stage_summary,
                 "rejection_detail_summary": reason_summary,
             }
         }
