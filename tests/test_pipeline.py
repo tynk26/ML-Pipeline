@@ -73,8 +73,8 @@ def test_label_rejection_reasons():
     # Verify rejection mapping
     error_map = stats["error_map"]
     assert "duplicate_label: car" in error_map[2]
-    assert "negative_obj_count: bus" in error_map[3]
-    assert "non_integer_obj_count: pedestrian" in error_map[4]
+    assert "negative_label_count: bus" in error_map[3]
+    assert "non_integer_label_count: pedestrian" in error_map[4]
     assert "invalid_object_class" in error_map[5]
     
     # Only ID 1 should make it to final_df

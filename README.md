@@ -120,6 +120,6 @@ pip install fastapi uvicorn pandas
 서버 실행:
 
 Bash
-uvicorn main:app --reload
+uvicorn app.main:app --reload
 API 문서 접속:
 http://127.0.0.1:8000/docs

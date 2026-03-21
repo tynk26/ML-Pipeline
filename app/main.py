@@ -104,61 +104,108 @@ async def analyze():
         if os.path.exists(DB_PATH): 
             os.remove(DB_PATH)
         raise HTTPException(status_code=500, detail=f"Pipeline Failure: {str(e)}")
-    
 @app.get("/rejections")
 def get_rejections(
-    reason: Optional[str] = Query(
-        None, 
-        description="거부 사유 (예: missing_odd_metadata, duplicate_odd_metadata, missing_label_data)",
-        openapi_examples={
-            "missing_odd": {"value": "missing_odd_metadata"},
-            "duplicate": {"value": "duplicate_odd_metadata"},
-            "missing_label": {"value": "missing_label_data"}
-        }
-    ), 
     stage: Optional[str] = Query(
         None, 
-        description="발생 단계 (예: odd_tagging_step, auto_labeling_step)",
+        description="데이터 처리 단계 (Step 1: ODD 또는 Step 2: Labeling)",
         openapi_examples={
-            "odd_stage": {"value": "odd_tagging_step"},
-            "label_stage": {"value": "auto_labeling_step"}
+            "Step 1: ODD Tagging": {
+                "summary": "1단계: ODD 매칭 단계",
+                "value": "odd_tagging_step"
+            },
+            "Step 2: Auto Labeling": {
+                "summary": "2단계: 라벨 데이터 검증 단계",
+                "value": "auto_labeling_step"
+            }
+        }
+    ),
+    reason: Optional[str] = Query(
+        None, 
+        description="해당 단계에 발생하는 구체적인 사유",
+        openapi_examples={
+            "ODD: Missing Metadata": {
+                "summary": "[ODD 전용] 메타데이터 누락",
+                "value": "missing_odd_metadata"
+            },
+            "ODD: Duplicate ID": {
+                "summary": "[ODD 전용] 중복된 비디오 ID",
+                "value": "duplicate_odd_metadata"
+            },
+            "Label: Missing Labels": {
+                "summary": "[Labeling 전용] 라벨링 데이터 없음",
+                "value": "missing_label_data"
+            },
+            "Label: Car Duplicates": {
+                "summary": "[Labeling 전용] 차량 라벨 중복",
+                "value": "duplicate_label: car"
+            },
+            "Label: Pedestrian Negatives": {
+                "summary": "[Labeling 전용] 보행자 수 음수 오류",
+                "value": "negative_obj_count: pedestrian"
+            }
         }
     ), 
-    page: int = Query(1, ge=1, description="페이지 번호"), 
-    size: int = Query(50, ge=1, le=100, description="페이지당 아이템 수")
+    page: int = Query(1, ge=1), 
+    size: int = Query(50, ge=1, le=100)
 ):
     """
-    Requirement 2-2: Get rejected data with filters for reason and stage.
+    ### 🛡️ 거절 데이터 필터링 가이드
+    Swagger UI의 각 파라미터 드롭다운에서 **단계(Stage)**와 **사유(Reason)** 조합을 선택하여 테스트할 수 있습니다.
+    
+    * **Step 1 (ODD)** 선택 시 -> `missing_odd_metadata` 등을 조합하세요.
+    * **Step 2 (Labeling)** 선택 시 -> `duplicate_label`이나 `negative_obj_count` 등을 조합하세요.
     """
     if not os.path.exists(DB_PATH):
-        return {"total": 0, "items": []}
+        return {"total": 0, "items": [], "summary_by_categories": {}}
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # Build filtered query
-    base_query = "FROM rejections WHERE 1=1"
-    params = []
-    if reason:
-        base_query += " AND reason = ?"; params.append(reason)
-    if stage:
-        base_query += " AND stage = ?"; params.append(stage)
+    # 1. 동적 요약 (Summary) 생성 - 현재 DB에 실시간으로 존재하는 카테고리 노출
+    summary_query = "SELECT stage, reason, COUNT(*) as count FROM rejections GROUP BY stage, reason"
+    cursor.execute(summary_query)
+    summary_rows = cursor.fetchall()
+    summary = {}
+    for row in summary_rows:
+        s, r, c = row["stage"], row["reason"], row["count"]
+        if s not in summary: summary[s] = {}
+        summary[s][r] = c
 
-    # Get total count for metadata
-    cursor.execute(f"SELECT COUNT(*) {base_query}", params)
+    # 2. 필터링 로직
+    base_query = "FROM rejections WHERE 1=1"
+    query_params = []
+    
+    if stage:
+        base_query += " AND stage = ?"
+        query_params.append(stage)
+    if reason:
+        # LIKE를 사용하여 'car'만 입력해도 'duplicate_label: car'를 찾도록 유연성 유지
+        base_query += " AND reason LIKE ?"
+        query_params.append(f"%{reason}%")
+
+    # 페이징 및 결과 반환
+    cursor.execute(f"SELECT COUNT(*) {base_query}", query_params)
     total_count = cursor.fetchone()[0]
 
-    # Get paginated data
     query = f"SELECT * {base_query} LIMIT ? OFFSET ?"
-    cursor.execute(query, params + [size, (page - 1) * size])
+    cursor.execute(query, query_params + [size, (page - 1) * size])
     rows = [dict(row) for row in cursor.fetchall()]
     
     for r in rows:
-        if r.get("raw_data"): r["raw_data"] = json.loads(r["raw_data"])
+        if r.get("raw_data"):
+            try: r["raw_data"] = json.loads(r["raw_data"])
+            except: pass
 
     conn.close()
-    return {"total": total_count, "page": page, "items": rows}
+    
+    return {
+        "status": "success",
+        "total": total_count,
+        "summary_by_categories": summary,
+        "items": rows
+    }
 
 @app.post("/search")
 def search_data(
