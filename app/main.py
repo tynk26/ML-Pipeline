@@ -214,39 +214,25 @@ def get_rejections(
         "items": rows
     }
 
-
 @app.post("/search", tags=["Search"])
 def search_data(
-    filters: dict = Body(
-        ...,
-        openapi_examples={
-            "Video_3_Sample": {
-                "summary": "복합 검색 예시 (비디오 ID 3번 환경)",
-                "description": "맑은 날, 밤, 건조한 노면, 차량 31대 등의 조건을 모두 만족하는 데이터를 찾습니다.",
-                "value": {
-                    "video_id_min": 3, "video_id_max": 3,
-                    "weather": "sunny", "time_of_day": "night", "road_surface": "dry",
-                    "wiper_on": 1, "headlights_on": 1,
-                    "wiper_level_min": 3, "wiper_level_max": 3,
-                    "label_car_min": 31, "label_car_max": 31, "label_pedestrian_min": 11
-                }
+    filters: dict = Body(..., openapi_examples={
+        "Video_3_Full_Confidence": {
+            "summary": "Video 3 마스터 검색 (Confidence 필터 포함)",
+            "value": {
+                "video_id_min": 3, "video_id_max": 3,
+                "weather": "sunny", "time_of_day": "night", "road_surface": "dry",
+                "wiper_on": 1, "headlights_on": 1,
+                "wiper_level_min": 3, "wiper_level_max": 3,
+                "label_car_min": 31, "label_car_max": 31,
+                "label_car_confidence_min": 0.8, "label_car_confidence_max": 0.9,
+                "label_pedestrian_min": 11, "label_pedestrian_confidence_min": 0.7
             }
         }
-    )
+    })
 ):
-    """
-    ### 🔍 정밀 시나리오 검색 (Sandwich Search)
-    환경 조건(날씨, 시간 등)과 객체 인식 결과를 조합하여 최적의 데이터를 추출합니다.
-    
-    * **직접 일치**: `weather`, `time_of_day`, `road_surface`, `headlights_on`, `wiper_on`
-    * **범위 검색**: `_min` 및 `_max` 접미사를 사용하여 수치형 데이터 필터링 가능
-    """
-    if not os.path.exists(DB_PATH):
-        raise HTTPException(status_code=503, detail="DB가 초기화되지 않았습니다. /analyze를 먼저 실행하세요.")
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    if not os.path.exists(DB_PATH): raise HTTPException(status_code=503, detail="DB 미초기화")
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
 
     query = "SELECT * FROM integrated_data WHERE 1=1"
     params = []
@@ -254,53 +240,34 @@ def search_data(
     # 1. DIRECT MATCHES
     direct_cols = ["weather", "time_of_day", "road_surface", "headlights_on", "wiper_on"]
     for col in direct_cols:
-        if col in filters and filters[col] is not None and filters[col] != "":
-            val = filters[col]
-            if col in ["headlights_on", "wiper_on"]:
-                query += f" AND {col} = ?"
-                params.append(int(val))
-            elif isinstance(val, str) and "," in val:
-                vals = [v.strip().lower() for v in val.split(",")]
-                query += f" AND LOWER({col}) IN ({', '.join(['?']*len(vals))})"
-                params.extend(vals)
-            else:
-                query += f" AND LOWER({col}) = LOWER(?)"
-                params.append(str(val))
-
-    if "source_path" in filters and filters["source_path"]:
-        query += " AND source_path LIKE ?"
-        params.append(f"%{filters['source_path']}%")
+        if col in filters and filters[col] is not None:
+            query += f" AND {col} = ?"; params.append(filters[col])
 
     # 2. RANGE MATCHES
     range_fields = ["video_id", "id", "temperature_fahrenheit", "temperature_celsius", "wiper_level", "recorded_at"]
     for key, val in filters.items():
         if val is None or val == "": continue
         target_col = None
+
         if key.startswith("label_"):
-            obj = key.replace("label_", "").replace("_min", "").replace("_max", "")
-            target_col = f"label_{obj}_count"
+            base_key = key.replace("_min", "").replace("_max", "")
+            target_col = base_key if "confidence" in base_key else f"label_{base_key.replace('label_', '')}_count"
         else:
             for field in range_fields:
                 if key.startswith(field):
                     target_col = field; break
+
         if target_col:
             try:
                 clean_val = val if target_col == "recorded_at" else float(val)
-                if key.endswith("_min"):
-                    query += f" AND {target_col} >= ?"; params.append(clean_val)
-                elif key.endswith("_max"):
-                    query += f" AND {target_col} <= ?"; params.append(clean_val)
+                if key.endswith("_min"): query += f" AND {target_col} >= ?"; params.append(clean_val)
+                elif key.endswith("_max"): query += f" AND {target_col} <= ?"; params.append(clean_val)
             except ValueError: continue
 
-    try:
-        cursor.execute(query, params)
-        rows = [dict(row) for row in cursor.fetchall()]
-        for r in rows:
-            if r.get("labels"): r["labels"] = json.loads(r["labels"])
-    except Exception as e:
-        conn.close()
-        raise HTTPException(status_code=500, detail=f"검색 중 오류 발생: {str(e)}")
-
+    cursor.execute(query, params)
+    rows = [dict(row) for row in cursor.fetchall()]
+    for r in rows:
+        if r.get("labels"): r["labels"] = json.loads(r["labels"])
     conn.close()
     return {"total_found": len(rows), "results": rows}
 
