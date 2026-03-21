@@ -296,108 +296,106 @@ def get_rejections(
         "summary_by_categories": summary,
         "items": rows
     }
-  
-@app.get("/rejections")
+
+@app.get("/rejections", tags=["Pipeline"])
 def get_rejections(
     stage: Optional[str] = Query(
         None, 
-        description="데이터 처리 단계 (Step 1: ODD 또는 Step 2: Labeling)",
+        description="데이터 처리 단계 필터",
         openapi_examples={
-            "Step 1: ODD Tagging": {
-                "summary": "1단계: ODD 매칭 단계",
-                "value": "odd_tagging_step"
-            },
-            "Step 2: Auto Labeling": {
-                "summary": "2단계: 라벨 데이터 검증 단계",
-                "value": "auto_labeling_step"
-            }
+            "Step 1: ODD Tagging": {"value": "odd_tagging_step"},
+            "Step 2: Auto Labeling": {"value": "auto_labeling_step"}
         }
     ),
     reason: Optional[str] = Query(
         None, 
-        description="해당 단계에 발생하는 구체적인 사유",
+        description="7가지 정밀 검증 사유 중 선택 (복합 사유 포함 검색)",
         openapi_examples={
-            "ODD: Missing Metadata": {
-                "summary": "[ODD 전용] ODD 데이터 없음",
-                "value": "missing_odd_metadata"
-            },
-            "ODD: Duplicate ID": {
-                "summary": "[ODD 전용] 중복된 ODD 비디오 ID",
-                "value": "duplicate_odd_metadata"
-            },
-            "Label: Missing Labels": {
-                "summary": "[Labeling 전용] LABELING 데이터 없음",
-                "value": "missing_label_data"
-            },
-            "Label: Car Duplicates": {
-                "summary": "[Labeling 전용] LABELING object 중복",
-                "value": "duplicate_label"
-            },
-            "Label: Pedestrian Negatives": {
-                "summary": "[Labeling 전용] LABELING object 음수 오류",
-                "value": "negative_obj_count"
-            }
+            "ODD: Missing Metadata": {"summary": "[ODD] 메타데이터 누락", "value": "missing_odd_metadata"},
+            "ODD: Duplicate ID": {"summary": "[ODD] 비디오 ID 중복", "value": "duplicate_odd_metadata"},
+            "Label: Missing Data": {"summary": "[Labeling] 라벨 파일 누락", "value": "missing_label_data"},
+            "Label: Zero Objects": {"summary": "[Labeling] 객체 수 0개", "value": "zero_obj_count"},
+            "Label: Negative Count": {"summary": "[Labeling] 객체 수 음수 오류", "value": "negative_obj_count"},
+            "Label: Non-Integer": {"summary": "[Labeling] 객체 수 소수점 오류", "value": "non_integer_obj_count"},
+            "Label: Duplicate Class": {"summary": "[Labeling] 클래스 중복 정의", "value": "duplicate_label_class"}
         }
     ), 
     page: int = Query(1, ge=1), 
     size: int = Query(50, ge=1, le=100)
 ):
     """
-    ### 🛡️ 거절 데이터 필터링 가이드
-    Swagger UI의 각 파라미터 드롭다운에서 **단계(Stage)**와 **사유(Reason)** 조합을 선택하여 테스트할 수 있습니다.
+    ### 🛡️ 거절 데이터 상세 조회 및 무결성 리포트
     
-    * **Step 1 (ODD)** 선택 시 -> `missing_odd_metadata` 등을 조합하세요.
-    * **Step 2 (Labeling)** 선택 시 -> `duplicate_label`이나 `negative_obj_count` 등을 조합하세요.
+    분석 파이프라인에서 격리된 불량 데이터를 조회합니다. 
+    
+    **주요 기능:**
+    1. **Data Overview:** 현재 DB에 적재된 단계별/사유별 에러 건수를 실시간 요약하여 반환합니다.
+    2. **Smart Filtering:** 특정 사유 선택 시, 해당 사유가 포함된 복합 에러(`reason1 & reason2`)까지 자동으로 검색합니다.
+    3. **Raw Data Insight:** 각 거절 항목에 포함된 원본 메타데이터(JSON)를 함께 확인할 수 있습니다.
     """
     if not os.path.exists(DB_PATH):
-        return {"total": 0, "items": [], "summary_by_categories": {}}
+        return {"status": "error", "message": "DB가 존재하지 않습니다. /analyze를 먼저 실행하세요."}
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    # 1. 동적 요약 (Summary) 생성 - 현재 DB에 실시간으로 존재하는 카테고리 노출
+    # --- [1] Data Overview: 실시간 에러 분포 요약 ---
     summary_query = "SELECT stage, reason, COUNT(*) as count FROM rejections GROUP BY stage, reason"
     cursor.execute(summary_query)
     summary_rows = cursor.fetchall()
-    summary = {}
+    
+    data_overview = {}
     for row in summary_rows:
         s, r, c = row["stage"], row["reason"], row["count"]
-        if s not in summary: summary[s] = {}
-        summary[s][r] = c
+        if s not in data_overview: data_overview[s] = {}
+        data_overview[s][r] = c
 
-    # 2. 필터링 로직
-    base_query = "FROM rejections WHERE 1=1"
-    query_params = []
+    # --- [2] Dynamic Filtering Logic ---
+    conditions = ["1=1"]
+    params = []
     
     if stage:
-        base_query += " AND stage = ?"
-        query_params.append(stage)
+        conditions.append("stage = ?")
+        params.append(stage)
+        
     if reason:
-        # LIKE를 사용하여 'car'만 입력해도 'duplicate_label: car'를 찾도록 유연성 유지
-        base_query += " AND reason LIKE ?"
-        query_params.append(f"%{reason}%")
+        # LIKE 연산자를 통해 복합 사유(&) 내에 해당 키워드가 포함된 모든 항목 검색
+        conditions.append("reason LIKE ?")
+        params.append(f"%{reason}%")
 
-    # 페이징 및 결과 반환
-    cursor.execute(f"SELECT COUNT(*) {base_query}", query_params)
+    where_clause = " AND ".join(conditions)
+
+    # --- [3] Pagination & Item Retrieval ---
+    cursor.execute(f"SELECT COUNT(*) FROM rejections WHERE {where_clause}", params)
     total_count = cursor.fetchone()[0]
 
-    query = f"SELECT * {base_query} LIMIT ? OFFSET ?"
-    cursor.execute(query, query_params + [size, (page - 1) * size])
-    rows = [dict(row) for row in cursor.fetchall()]
+    final_query = f"SELECT * FROM rejections WHERE {where_clause} LIMIT ? OFFSET ?"
+    cursor.execute(final_query, params + [size, (page - 1) * size])
     
-    for r in rows:
-        if r.get("raw_data"):
-            try: r["raw_data"] = json.loads(r["raw_data"])
-            except: pass
+    items = []
+    for row in cursor.fetchall():
+        item = dict(row)
+        # raw_data가 JSON 문자열인 경우 객체로 파싱
+        if item.get("raw_data"):
+            try:
+                item["raw_data"] = json.loads(item["raw_data"])
+            except:
+                pass
+        items.append(item)
 
     conn.close()
     
     return {
         "status": "success",
-        "total": total_count,
-        "summary_by_categories": summary,
-        "items": rows
+        "data_overview": data_overview, # 에러 분포 현황
+        "metadata": {
+            "total_count": total_count,
+            "page": page,
+            "size": size,
+            "total_pages": (total_count + size - 1) // size if total_count > 0 else 0
+        },
+        "items": items # 필터링된 실제 거절 데이터 목록
     }
 
 @app.post("/search", tags=["Search"])
