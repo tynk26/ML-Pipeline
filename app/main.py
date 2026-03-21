@@ -107,10 +107,25 @@ async def analyze():
     
 @app.get("/rejections")
 def get_rejections(
-    reason: Optional[str] = None, 
-    stage: Optional[str] = None, 
-    page: int = 1, 
-    size: int = 50
+    reason: Optional[str] = Query(
+        None, 
+        description="거부 사유 (예: missing_odd_metadata, duplicate_odd_metadata, missing_label_data)",
+        openapi_examples={
+            "missing_odd": {"value": "missing_odd_metadata"},
+            "duplicate": {"value": "duplicate_odd_metadata"},
+            "missing_label": {"value": "missing_label_data"}
+        }
+    ), 
+    stage: Optional[str] = Query(
+        None, 
+        description="발생 단계 (예: odd_tagging_step, auto_labeling_step)",
+        openapi_examples={
+            "odd_stage": {"value": "odd_tagging_step"},
+            "label_stage": {"value": "auto_labeling_step"}
+        }
+    ), 
+    page: int = Query(1, ge=1, description="페이지 번호"), 
+    size: int = Query(50, ge=1, le=100, description="페이지당 아이템 수")
 ):
     """
     Requirement 2-2: Get rejected data with filters for reason and stage.
