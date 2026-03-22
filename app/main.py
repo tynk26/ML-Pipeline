@@ -340,113 +340,227 @@ def get_rejections(
         },
         "items": items
     }
+
+# @app.post("/search", tags=["Search"])
+# async def search_data(
+#     page: int = Query(1, ge=1),
+#     size: int = Query(10, ge=1, le=100),
+#     filters: dict = Body(..., openapi_examples={
+#         "Video_3_Comprehensive_Sandwich": {
+#             "summary": "Video #3 전수 컬럼 샌드위치 검색 (성공 보장)",
+#             "description": "실제 DB 컬럼명과 1:1 매칭 확인 완료. 소수점 데이터는 샌드위치 기법으로 검색합니다.",
+#             "value": {
+#                 # 1. ODD & Sensor (Direct Match)
+#                 "weather": "sunny",
+#                 "time_of_day": "night",
+#                 "road_surface": "dry",
+#                 "wiper_on": 1,         # DB 저장값인 1/0 정수로 입력
+#                 "headlights_on": 1,
+
+#                 # 2. Metadata (Sandwiching)
+#                 "video_id_min": 3,
+#                 "video_id_max": 3,
+#                 "id_min": 3,
+#                 "id_max": 3,
+#                 "wiper_level_min": 3,
+#                 "wiper_level_max": 3,
+                
+#                 # [중요] 소수점 정밀도 대응 샌드위치
+#                 "temperature_celsius_min": 14.5,
+#                 "temperature_celsius_max": 14.6,
+#                 "temperature_fahrenheit_min": 58.1,
+#                 "temperature_fahrenheit_max": 58.3,
+
+#                 # 3. Unpacked Label Counts (Sandwiching)
+#                 # 'label_car_min' -> DB의 'label_car_count' 컬럼 타겟팅
+#                 "label_car_min": 31,
+#                 "label_car_max": 31,
+#                 "label_pedestrian_min": 26,
+#                 "label_pedestrian_max": 26,
+#                 "label_traffic_sign_min": 11,
+#                 "label_traffic_sign_max": 11,
+#                 "label_truck_min": 0,
+#                 "label_truck_max": 0,
+#                 "label_bus_min": 0,
+#                 "label_bus_max": 0,
+
+#                 # 4. Unpacked Label Confidence (Sandwiching)
+#                 # 'label_car_confidence_min' -> DB의 'label_car_confidence' 컬럼 타겟팅
+#                 "label_car_confidence_min": 0.83,
+#                 "label_car_confidence_max": 0.84,
+#                 "label_pedestrian_confidence_min": 0.73,
+#                 "label_pedestrian_confidence_max": 0.74,
+#                 "label_traffic_sign_confidence_min": 0.90,
+#                 "label_traffic_sign_confidence_max": 0.92,
+#                 "label_truck_confidence_min": 0.94,
+#                 "label_truck_confidence_max": 0.95,
+
+#                 # 5. Temporal Range
+#                 "recorded_at_min": "2026-01-10 10:44:00",
+#                 "recorded_at_max": "2026-01-10 10:45:00"
+#             }
+#         }
+#     })
+# ):
+#     """
+#     ## 🔍 POST /search: 통합 데이터셋 정밀 검색
+
+#     이 엔드포인트는 `/analyze`를 통해 정제된 `integrated_data` 테이블에서 동적 쿼리를 생성합니다.
+
+#     ---
+#     ### 1. 기능 요약 (Features)
+#     * **Full Schema Coverage**: ODD 메타데이터와 언패킹된 레이블 컬럼을 모두 지원합니다.
+#     * **Strict Column Mapping**: `label_{class}_min`은 `label_{class}_count` 컬럼에, `label_{class}_confidence_min`은 `label_{class}_confidence` 컬럼에 매핑됩니다.
+#     * **Performance Optimized**: `raw_data`를 로드하지 않아 대량 검색 시에도 응답 속도가 빠릅니다.
+
+#     ---
+#     ### 2. 요청 가이드 (Request)
+#     * **Direct Match**: `weather`, `time_of_day`, `road_surface`, `headlights_on`, `wiper_on` (값 그대로 매칭)
+#     * **Range Match**: `{column}_min` 또는 `{column}_max` 접미사를 사용하여 `>=` 또는 `<=` 조건 생성
+#     * **Label Syntax**:
+#         * 개수: `label_car_min: 10` -> `label_car_count >= 10`
+#         * 신뢰도: `label_car_confidence_min: 0.8` -> `label_car_confidence >= 0.8`
+
+#     ---
+#     ### 3. 응답 결과 (Response)
+#     * **pagination**: 현재 페이지, 사이즈, 검색된 총 결과 수 반환
+#     * **results**: 조건에 맞는 영상 데이터 리스트 (labels 필드는 JSON 객체로 포함)
+#     """
+#     # ... (기존 비즈니스 로직 유지)
+
 @app.post("/search", tags=["Search"])
 async def search_data(
-    page: int = Query(1, ge=1, description="페이지 번호"),
-    size: int = Query(10, ge=1, le=100, description="페이지당 결과 수"),
+    page: int = Query(1, ge=1),
+    size: int = Query(10, ge=1, le=100),
     filters: dict = Body(..., openapi_examples={
-        "Master_Search": {
-            "summary": "복합 필터 검색 예시",
+        "Comprehensive_Video3_Master": {
+            "summary": "Video #3 전수 컬럼 검색 (참조용)",
+            "description": "Video #3의 모든 컬럼명을 노출하며, 정밀 일치와 범위 검색을 조합한 마스터 샘플입니다.",
             "value": {
+                # 1. 정밀 일치 필터 (Equivalence Values)
+                # ODD 및 센서 데이터 (DB 저장 타입인 0/1 정수 권장)
                 "weather": "sunny",
-                "label_car_min": 5,
-                "label_car_confidence_min": 0.8,
-                "wiper_on": False,
-                "headlights_on": True
+                "time_of_day": "night",
+                "road_surface": "dry",
+                "wiper_on": 1, 
+                "headlights_on": 1,
+
+                # 2. 범위 및 샌드위치 필터 (Ranged Values)
+                # 메타데이터 범위
+                "video_id_min": 3,
+                "video_id_max": 3,
+                "id_min": 3,
+                "id_max": 3,
+                "wiper_level_min": 3,
+                "wiper_level_max": 3,
+                
+                # 소수점 데이터 샌드위치 (부동 소수점 정밀도 대응)
+                "temperature_celsius_min": 14.5,
+                "temperature_celsius_max": 14.6,
+                "temperature_fahrenheit_min": 58.1,
+                "temperature_fahrenheit_max": 58.3,
+
+                # 3. 언패킹된 레이블 개수 필터 (Object Counts)
+                # 형식: label_{class}_min / label_{class}_max
+                "label_car_min": 31,
+                "label_car_max": 31,
+                "label_pedestrian_min": 26,
+                "label_pedestrian_max": 26,
+                "label_traffic_sign_min": 11,
+                "label_traffic_sign_max": 11,
+                "label_truck_min": 0,
+                "label_truck_max": 0,
+                "label_bus_min": 0,
+                "label_bus_max": 0,
+                "label_cyclist_min": 0,
+                "label_motorcycle_min": 0,
+                "label_traffic_light_min": 0,
+
+                # 4. 언패킹된 레이블 신뢰도 필터 (Confidence Ranges)
+                # 형식: label_{class}_confidence_min / _max
+                "label_car_confidence_min": 0.83,
+                "label_car_confidence_max": 0.84,
+                "label_pedestrian_confidence_min": 0.73,
+                "label_pedestrian_confidence_max": 0.74,
+                "label_traffic_sign_confidence_min": 0.90,
+                "label_traffic_sign_confidence_max": 0.92,
+                "label_truck_confidence_min": 0.94,
+                "label_truck_confidence_max": 0.95,
+
+                # 5. 시간 범위 필터 (Temporal Sandwich)
+                "recorded_at_min": "2026-01-10 10:44:00",
+                "recorded_at_max": "2026-01-10 10:45:00"
             }
         }
     })
 ):
     """
-    ## `POST /search`
-    통합 데이터베이스에서 조건에 맞는 데이터를 검색합니다.
-    - **Pagination**: `page`와 `size` 쿼리 파라미터로 제어합니다.
-    - **Dynamic Filtering**: ODD 조건 및 Unpacked Label 조건을 조합할 수 있습니다.
+    ## 🔍 통합 데이터셋 API 가이드
+    이 문서는 `/analyze`를 통해 가공된 `integrated_data` 테이블의 모든 컬럼 정보를 제공합니다.
+
+    ### 📝 컬럼 네이밍 규칙 (Key Naming Convention)
+    1. **Direct Match**: 컬럼명을 그대로 사용합니다. (`weather`, `wiper_on` 등)
+    2. **Numeric Range**: 컬럼명 뒤에 `_min` 또는 `_max`를 붙입니다. (`video_id_min`)
+    3. **Unpacked Labels**:
+       - 개수 검색: `label_{class}_min` (예: `label_car_min` -> `label_car_count` 컬럼 타겟팅)
+       - 신뢰도 검색: `label_{class}_confidence_min` (예: `label_car_confidence_min` -> `label_car_confidence` 컬럼 타겟팅)
+
+    ### ⚠️ 검색 시 주의사항
+    - **Floating Point**: 온도(`temperature_celsius`)와 신뢰도(`confidence`)는 `=` 비교보다 `_min` & `_max`를 함께 사용하는 **샌드위치 기법**이 훨씬 정확합니다.
+    - **Boolean**: `wiper_on` 등은 `True/False` 대신 `1/0`을 사용하는 것이 SQLite 엔진 최적화에 유리합니다.
     """
     if not os.path.exists(DB_PATH):
-        raise HTTPException(status_code=503, detail="데이터베이스가 존재하지 않습니다. /analyze를 먼저 실행하세요.")
+        raise HTTPException(status_code=503, detail="DB 미초기화")
 
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+    where_clauses = ["1=1"]; params = []
 
-    # 1. Base Query (raw_data는 성능을 위해 제외)
-    # 필요한 모든 컬럼을 명시하거나, 이미 /analyze에서 정리된 integrated_data 사용
-    where_clauses = ["1=1"]
-    params = []
-
-    # 2. 필터 로직 처리
     for key, val in filters.items():
-        if val is None or val == "":
-            continue
+        if val is None or val == "": continue
 
-        # A. 직접 일치 (Direct Match - ODD 필드)
+        # 1. 직접 일치 (Direct Match)
         direct_cols = ["weather", "time_of_day", "road_surface", "headlights_on", "wiper_on"]
         if key in direct_cols:
-            if isinstance(val, bool):
-                val = 1 if val else 0
-            where_clauses.append(f"{key} = ?")
-            params.append(val)
+            # DB가 0/1 정수형이므로 불리언/문자열을 정수로 변환
+            clean_val = int(val) if isinstance(val, (bool, int)) or (isinstance(val, str) and val.isdigit()) else val
+            where_clauses.append(f"{key} = ?"); params.append(clean_val)
 
-        # B. 범위 검색 (Range Match - Label 및 수치형)
+        # 2. 범위/샌드위치 매칭 (Range Match)
         elif key.endswith(("_min", "_max")):
             is_min = key.endswith("_min")
             base_key = key.replace("_min", "").replace("_max", "")
             
             target_col = None
-            # Label 관련 (label_car_min -> label_car_count)
             if base_key.startswith("label_"):
+                # label_car_confidence_min -> label_car_confidence
                 if "confidence" in base_key:
-                    target_col = base_key # label_car_confidence
+                    target_col = base_key
+                # label_car_min -> label_car_count
                 else:
-                    target_col = f"{base_key}_count" # label_car_count
-            # 일반 수치형 (temperature_celsius_min -> temperature_celsius)
+                    target_col = f"{base_key}_count"
             else:
+                # video_id, temperature_celsius 등
                 target_col = base_key
 
-            operator = ">=" if is_min else "<="
-            where_clauses.append(f"{target_col} {operator} ?")
-            params.append(val)
+            op = ">=" if is_min else "<="
+            where_clauses.append(f"{target_col} {op} ?"); params.append(val)
 
-    # 3. 쿼리 조립
+    # 쿼리 조립 및 실행
     where_stmt = " AND ".join(where_clauses)
-    
-    # 전체 개수 확인 (페이지네이션 계산용)
     count_query = f"SELECT COUNT(*) FROM integrated_data WHERE {where_stmt}"
     cursor.execute(count_query, params)
     total_found = cursor.fetchone()[0]
 
-    # 실제 데이터 조회 (LIMIT/OFFSET 적용)
     offset = (page - 1) * size
-    # [성능 최적화] * 대신 필요한 컬럼만 나열하는 것이 좋으나, 편의상 * 사용 (raw_data는 이미 /analyze 단계에서 제거 권장)
-    search_query = f"""
-        SELECT * FROM integrated_data 
-        WHERE {where_stmt} 
-        LIMIT ? OFFSET ?
-    """
+    search_query = f"SELECT * FROM integrated_data WHERE {where_stmt} LIMIT ? OFFSET ?"
     cursor.execute(search_query, params + [size, offset])
+    
     rows = [dict(row) for row in cursor.fetchall()]
-
-    # 4. JSON 필드 복원 (labels 등)
     for r in rows:
-        if "labels" in r and r["labels"]:
-            try:
-                r["labels"] = json.loads(r["labels"])
-            except:
-                pass
-
+        if r.get("labels"): r["labels"] = json.loads(r["labels"])
+    
     conn.close()
-
-    return {
-        "status": "success",
-        "pagination": {
-            "page": page,
-            "size": size,
-            "total_found": total_found,
-            "total_pages": (total_found + size - 1) // size if total_found > 0 else 0
-        },
-        "results": rows
-    }
+    return {"status": "success", "pagination": {"page": page, "size": size, "total_found": total_found}, "results": rows}
 
 @app.get("/joined_data", tags=["View"])
 def get_joined_data():
