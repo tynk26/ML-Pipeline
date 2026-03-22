@@ -315,3 +315,69 @@ JSON
 페이지네이션: 대량의 데이터 조회 시 page와 size 파라미터를 활용하여 네트워크 부하를 최소화하십시오.
 
 데이터 백업: 생성된 ml_data.db 파일은 로컬 SQLite 툴(예: DBeaver, DB Browser for SQLite)을 통해 직접 쿼리하거나 백업할 수 있습니다.
+
+# 📡 7. API 엔드포인트 상세 실행 가이드
+
+본 시스템은 FastAPI의 자동 문서화 기능을 통해 별도의 클라이언트 없이도 웹 브라우저(Swagger UI)에서 즉시 테스트가 가능합니다.
+
+---
+
+## 7.1 환경 구축 및 서버 실행 (Quick Start)
+
+데이터 분석 및 API 서빙을 위한 필수 라이브러리를 설치하고 서버를 가동합니다.
+
+### 1. 의존성 설치
+
+```bash
+pip install fastapi uvicorn pandas
+2. 서버 실행 (프로젝트 루트 디렉토리 기준)
+uvicorn app.main:app --reload
+3. API 문서 접속
+
+서버 실행 후 브라우저에서 아래 주소로 접속합니다.
+http://127.0.0.1:8000/docs
+
+7.2 주요 엔드포인트 활용법
+1️⃣ 데이터 파이프라인 구동: POST /analyze
+
+모든 데이터 프로세싱의 시작점입니다. 분산된 CSV/JSON 소스를 읽어 무결성을 검증하고 관계형 DB(SQLite)에 적재합니다.
+
+실행 방법: Swagger UI에서 Try it out ➔ Execute 버튼 클릭.
+작동 원리:
+Stage 1 (ODD): 환경 메타데이터 매칭 및 중복 검사.
+Stage 2 (Labeling): 객체 카운트 논리 오류(음수, 실수, 누락 등) 검사.
+결과: 통합 성공 수치, 정제 효율(%), 사유별 거절 통계 리포트 반환.
+2️⃣ 오류 데이터 정밀 추적: GET /rejections
+
+검증 파이프라인에서 탈락한 데이터를 상세 사유와 함께 조회하여 데이터 품질을 진단합니다.
+
+주요 파라미터:
+stage: 특정 검증 단계(odd_tagging_step, auto_labeling_step)별 필터링.
+reason: 구체적 오류 코드(zero_obj_count, missing_odd_metadata 등) 검색.
+활용 팁:
+raw_data 필드를 확인하여 원본 데이터의 어떤 부분이 규격에 맞지 않는지 즉각적인 디버깅이 가능합니다.
+3️⃣ 고성능 조건부 검색: POST /search
+
+정제 완료된 integrated_data를 대상으로 ML 모델 학습에 필요한 최적의 데이터셋을 추출합니다.
+
+요청 예시 (Scenario: High Density Sunny Night)
+{
+  "weather": "sunny",
+  "time_of_day": "night",
+  "video_id_min": 1,
+  "video_id_max": 100,
+  "label_car_min": 30,
+  "label_pedestrian_min": 10,
+  "recorded_at_min": "2026-03-01"
+}
+핵심 기능:
+모든 수치형 필드에 대해 _min, _max 접미사를 통한 범위(Sandwich) 검색을 지원하며,
+라벨 데이터 내의 특정 클래스 개수별 필터링이 가능합니다.
+7.3 운영 팁 (Best Practices)
+초기화:
+데이터 소스(selections.json 등)가 변경된 경우, 항상 POST /analyze를 재실행하여 DB를 최신화하십시오.
+페이지네이션:
+대량의 데이터 조회 시 page와 size 파라미터를 활용하여 네트워크 부하를 최소화하십시오.
+데이터 백업:
+생성된 ml_data.db 파일은 로컬 SQLite 툴(예: DBeaver, DB Browser for SQLite)을 통해 직접 쿼리하거나 백업할 수 있습니다.
+```
