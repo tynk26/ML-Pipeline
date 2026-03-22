@@ -40,7 +40,11 @@ def normalize_selections(selections: list) -> pd.DataFrame:
         records.append(record)
 
     df = pd.DataFrame(records)
-    df["recorded_at"] = pd.to_datetime(df["recorded_at"], errors="coerce", utc=True)
+    temp_dt = pd.to_datetime(df["recorded_at"], errors="coerce")
+    
+    df["recorded_at"] = temp_dt.apply(
+        lambda x: x.strftime('%Y-%m-%dT%H:%M:%S%z') if pd.notnull(x) else None
+    )
     df["wiper_on"] = df["wiper_on"].astype("boolean")
     df["headlights_on"] = df["headlights_on"].astype("boolean")
     df["wiper_level"] = df["wiper_level"].fillna(0).astype(int)

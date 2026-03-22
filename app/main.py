@@ -134,23 +134,29 @@ async def analyze():
         # --- STAGE 3: DB 적재 ---
         conn = sqlite3.connect(DB_PATH)
         
-        # 1. Rejections 테이블 (사후 분석을 위해 raw_data 유지)
+        # 1. Rejections 테이블 (원본 데이터 그대로 유지)
         if rejection_frames:
             all_rejections_df = pd.concat(rejection_frames, ignore_index=True)
             all_rejections_df.to_sql("rejections", conn, if_exists="replace", index=False)
         else:
             pd.DataFrame(columns=["video_id", "stage", "reason", "raw_data"]).to_sql("rejections", conn, if_exists="replace", index=False)
 
-        # 2. Integrated Data 테이블 (raw_data 제거 후 적재)
-        # [수정된 부분]
+        # 2. Integrated Data 테이블 (KST 유지 및 labeled_at 추가)
         if not integrated_df.empty:
-            # raw_data 컬럼이 존재할 경우에만 삭제하여 에러 방지
+            # [수정 1] 검색에 불필요한 raw_data만 제거 (id, video_id 등은 모두 유지)
             final_storage_df = integrated_df.drop(columns=['raw_data'], errors='ignore')
+
+            # [수정 2] labeled_at 컬럼 추가 (KST 현재 시간 기준)
+            # .isoformat()을 사용하면 원본 recorded_at의 'T' 포맷과 일치하게 저장됩니다.
+            from datetime import datetime
+            now_kst = datetime.now().astimezone().isoformat() # 시스템 KST 시간 가져오기
+            final_storage_df['labeled_at'] = now_kst
+
+            # [참고] recorded_at은 normalize_selections에서 넘어온 KST 포맷 그대로 저장됩니다.
             final_storage_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
         else:
-            # 데이터가 없을 경우 스키마만 생성 (raw_data 제외)
-            # integrated_df의 컬럼 중 raw_data를 뺀 리스트 사용
-            cols = [c for c in integrated_df.columns if c != 'raw_data']
+            # 데이터가 없을 경우 스키마 생성 (labeled_at 포함)
+            cols = [c for c in integrated_df.columns if c != 'raw_data'] + ['labeled_at']
             pd.DataFrame(columns=cols).to_sql("integrated_data", conn, if_exists="replace", index=False)
 
         conn.close()
