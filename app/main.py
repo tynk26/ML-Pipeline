@@ -207,10 +207,10 @@ def get_rejections(
             "All": {"summary": "전체 사유", "value": None},
             "ODD: Missing Metadata": {"value": "missing_odd_metadata"},
             "ODD: Duplicate ID": {"value": "duplicate_odd_metadata"},
-            "Label: Missing Data": {"value": "missing_label_data"},
-            "Label: Negative Count": {"value": "negative_obj_count"},
-            "Label: Non-Integer": {"value": "non_integer_obj_count"},
-            "Label: Duplicate Class": {"value": "duplicate_label_class"}
+            "Label: Missing Label Data": {"value": "missing_label_data"},
+            "Label: Negative Object Count": {"value": "negative_obj_count"},
+            "Label: Non-Integer Object Count": {"value": "non_integer_obj_count"},
+            "Label: Duplicate Object Class": {"value": "duplicate_label_class"}
         }
     ), 
     page: int = Query(1, ge=1), 
@@ -388,20 +388,70 @@ async def search_data(
     })
 ):
     """
-    ## 🔍 통합 데이터셋 API 가이드
-    이 문서는 `/analyze`를 통해 가공된 `integrated_data` 테이블의 모든 컬럼 정보를 제공합니다.
+    ## `POST /search` 통합 데이터셋 필터 검색 (Search & Filtering):  정제·통합 완료된 데이터를 다양한 조건으로 필터링하여 조회할 수 있는 엔드포인트입니다.
+    이 엔드포인트는 `/analyze` 프로세스를 거쳐 `integrated_data` 테이블에 적재된 데이터를 필터링하여 제공합니다.
 
-    ### 📝 컬럼 네이밍 규칙 (Key Naming Convention)
-    1. **Direct Match**: 컬럼명을 그대로 사용합니다. (`weather`, `wiper_on` 등)
-    2. **Numeric Range**: 컬럼명 뒤에 `_min` 또는 `_max`를 붙입니다. (`video_id_min`)
-    3. **Unpacked Labels**:
-       - 개수 검색: `label_{class}_min` (예: `label_car_min` -> `label_car_count` 컬럼 타겟팅)
-       - 신뢰도 검색: `label_{class}_confidence_min` (예: `label_car_confidence_min` -> `label_car_confidence` 컬럼 타겟팅)
+    ### 1. 필터링 원칙 (Filtering Rules)
+    모든 필터는 `AND` 조건으로 결합되며, 크게 세 가지 매칭 방식을 지원합니다.
 
-    ### ⚠️ 검색 시 주의사항
-    - **Floating Point**: 온도(`temperature_celsius`)와 신뢰도(`confidence`)는 `=` 비교보다 `_min` & `_max`를 함께 사용하는 **샌드위치 기법**이 훨씬 정확합니다.
-    - **Boolean**: `wiper_on` 등은 `True/False` 대신 `1/0`을 사용하는 것이 SQLite 엔진 최적화에 유리합니다.
+    * **정밀 일치 (Direct Match)**: 
+        - 대상: `weather`, `time_of_day`, `road_surface`, `headlights_on`, `wiper_on`
+        - 사용법: 컬럼명과 값을 그대로 전달 (예: `"weather": "sunny"`)
+        - 비고: `wiper_on` 같은 Boolean 성격의 필드는 `0` 또는 `1` 전송을 권장합니다.
+
+    * **수치 범위 (Numeric Range)**:
+        - 대상: `video_id`, `id`, `temperature_celsius`, `wiper_level` 및 모든 라벨 통계
+        - 사용법: `{컬럼명}_min` 또는 `{컬럼명}_max` 접미사 사용 (예: `"video_id_min": 100`)
+        - 부동 소수점(`temperature`)은 `_min`과 `_max`를 모두 사용하여 오차 범위를 잡는 **샌드위치 필터링**을 권장합니다.
+        - 라벨 개수 필터는 `label_{class}_min` / `label_{class}_max` 형식으로, 신뢰도 필터는 `label_{class}_confidence_min` / `_max` 형식으로 전달합니다.
+        - video_id_min = 3, video_id_max = 3과 같이 동일한 값을 min/max로 전달하면 해당 값과 정확히 일치하는 레코드만 조회됩니다. 이는 정밀 일치와 유사한 효과를 낼 수 있습니다.
+        - 예시: `"label_car_min": 5`는 자동차가 최소 5개 이상인 영상 검색, `"label_pedestrian_confidence_min": 0.8`는 보행자 신뢰도가 최소 0.8 이상인 영상 검색.
+
+    * **언패킹된 라벨 필터 (Unpacked Labels)**:
+        - **객체 수**: `label_{class}_min` 형식 (예: `"label_car_min": 5`) -> `label_car_count` 컬럼 매핑
+        - **신뢰도**: `label_{class}_confidence_min` 형식 (예: `"label_pedestrian_confidence_min": 0.8`)
+
+    ### 2. 🕒 시간 데이터 검색 특화 (Time-Series Matching)
+    `recorded_at` 및 `labeled_at` 필드는 SQLite의 `substr` 함수를 이용한 **유연한 부분 일치**를 지원합니다.
+    - **동작 방식**: 사용자가 입력한 문자열 길이만큼 DB 값을 잘라서 비교합니다.
+    - **예시**: 
+        - `"recorded_at_min": "2026-03-15"` 입력 시 -> 2026년 3월 15일 00시 이후 데이터 전체 검색
+        - `"recorded_at_min": "2026-03-15T09:00"` 입력 시 -> 해당 날짜 오전 9시 이후 데이터 검색
+
+    ### 3. 페이지네이션 (Pagination)
+    - `page`: 조회할 페이지 번호 (1부터 시작)
+    - `size`: 페이지당 결과 수 (최대 100개)
+    - Response에는 `total_found`가 포함되어 전체 검색 규모를 파악할 수 있습니다.
+    
+    ### 4. 요청 예시 (Request Sample)
+    ```json
+    {
+      "weather": "sunny", "time_of_day": "night",
+      "video_id_min": 3, "video_id_max": 3,
+      "temperature_celsius_min": 14.5, "temperature_celsius_max": 14.6,
+      "label_car_min": 31, "label_car_confidence_min": 0.83,
+      "recorded_at_min": "2026-01-10T00:00:00"
+    }
+    ```
+
+    ### 5. 응답 예시 (Response Sample)
+    ```json
+    {
+      "status": "success",
+      "pagination": { "page": 1, "size": 50, "total_found": 1 },
+      "results": [
+        {
+          "video_id": 3, "weather": "sunny", "time_of_day": "night",
+          "temperature_celsius": 14.55, "wiper_on": 1,
+          "labels": { "car": { "count": 31, "avg_confidence": 0.831 } },
+          "label_car_count": 31, "label_car_confidence": 0.831,
+          "recorded_at": "2026-01-10T19:44:32+0900"
+        }
+      ]
+    }
+    ```
     """
+   
     if not os.path.exists(DB_PATH):
         raise HTTPException(status_code=503, detail="DB 미초기화")
 
