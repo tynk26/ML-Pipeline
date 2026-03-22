@@ -126,11 +126,6 @@ async def analyze():
         # 2. Integrated Data 테이블
         if not integrated_df.empty:
             final_storage_df = integrated_df.drop(columns=['raw_data'], errors='ignore')
-
-            # [FIX] 아래의 datetime.now() 관련 코드를 제거하여 
-            # preprocessing.py에서 가져온 원본 labeled_at이 유지되도록 합니다.
-            # (기존의 덮어쓰기 로직 삭제)
-
             final_storage_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
         else:
             cols = [c for c in integrated_df.columns if c != 'raw_data']
@@ -139,7 +134,6 @@ async def analyze():
         conn.close()
 
         # --- STAGE 4: Statistical Report ---
-        # ... (이하 동일) ...
         total_vids_count = len(integrated_df)
         
         count_cols = [c for c in integrated_df.columns if c.startswith("label_") and c.endswith("_count")]
@@ -487,7 +481,6 @@ async def search_data(
                 val_len = len(clean_val)
                 
                 # 3. DB의 데이터도 동일한 길이만큼 잘라서 비교 (substr 사용)
-                # 이렇게 하면 DB의 '+0900' 부분을 무시하고 앞부분 시간만 비교합니다.
                 op = ">=" if is_min else "<="
                 where_clauses.append(f"substr({target_col}, 1, {val_len}) {op} ?")
                 params.append(clean_val)
@@ -514,15 +507,92 @@ async def search_data(
     conn.close()
     return {"status": "success", "pagination": {"page": page, "size": size, "total_found": total_found}, "results": rows}
 
-# @app.get("/joined_data", tags=["View"])
-# def get_joined_data():
-#     """### 📂 통합 데이터 미리보기 (Top 50)"""
-#     if not os.path.exists(DB_PATH): raise HTTPException(status_code=503, detail="DB 초기화 필요")
-#     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row
-#     cursor = conn.cursor()
-#     cursor.execute("SELECT * FROM integrated_data LIMIT 50")
-#     rows = [dict(row) for row in cursor.fetchall()]
-#     for r in rows:
-#         if r.get("labels"): r["labels"] = json.loads(r["labels"])
-#     conn.close()
-#     return {"count": len(rows), "data": rows}
+@app.get("/joined_data", tags=["View"])
+def get_joined_data():
+    """### 📂 통합 데이터 미리보기 (Top 50)"""
+    if not os.path.exists(DB_PATH): raise HTTPException(status_code=503, detail="DB 초기화 필요")
+    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM integrated_data LIMIT 50")
+    rows = [dict(row) for row in cursor.fetchall()]
+    for r in rows:
+        if r.get("labels"): r["labels"] = json.loads(r["labels"])
+    conn.close()
+    return {"count": len(rows), "data": rows}
+
+# --- 7. API Endpoint & Extended Logic Tests ---
+
+def test_analyze_endpoint_car_density_metrics():
+    """analyze API: 고밀도 차량 데이터 분석 로직 검증 (40대 이상)."""
+    merged_df = pd.DataFrame([{"video_id": 37}])
+    labels_df = pd.DataFrame([
+        {"video_id": 37, "object_class": "car", "obj_count": 46, "avg_confidence": 0.95, "labeled_at": "T1"},
+        {"video_id": 37, "object_class": "pedestrian", "obj_count": 25, "avg_confidence": 0.72, "labeled_at": "T1"}
+    ])
+    
+    final_df, _ = merge_with_labels(merged_df, labels_df)
+    
+    # 분석 API가 의존하는 핵심 필드 존재 여부 확인
+    assert final_df.iloc[0]["label_car_count"] >= 40
+    assert "labels" in final_df.columns
+
+def test_rejections_endpoint_multiple_failure_priority():
+    """rejections API: 한 ID에 여러 에러가 있을 때의 우선순위 혹은 누적 확인."""
+    merged_df = pd.DataFrame([{"video_id": 99}])
+    # 중복(duplicate)이면서 음수(negative)인 케이스
+    labels_df = pd.DataFrame([
+        {"video_id": 99, "object_class": "car", "obj_count": -1, "avg_confidence": 0.9, "labeled_at": "T"},
+        {"video_id": 99, "object_class": "car", "obj_count": -1, "avg_confidence": 0.8, "labeled_at": "T"}
+    ])
+    
+    _, stats = merge_with_labels(merged_df, labels_df)
+    
+    # rejections API는 error_map에 해당 ID가 등록되었는지가 중요
+    assert 99 in stats["error_map"]
+    assert stats["error_map"][99] in ["duplicate_label_class", "negative_obj_count"]
+
+def test_search_api_range_query_compatibility():
+    """search API: 온도 범위 쿼리(LTE/GTE)를 위한 데이터 정규화 확인."""
+    data = [
+        {"id": 37, "recordedAt": "2026-02-25 18:27:20", "sensor": {"temperature": {"value": 66.38}}}
+    ]
+    df = normalize_selections(data)
+    
+    # Search API에서 15.0 <= temp <= 25.0 쿼리 시 19.1이 검색되는지 확인
+    temp_val = df.iloc[0]["temperature_celsius"]
+    assert 15.0 <= temp_val <= 25.0
+
+def test_search_api_hardware_filter_logic():
+    """search API: 하드웨어 필터(headlights_on) 검색 조건 확인."""
+    data = [
+        {"id": 37, "recordedAt": "T", "sensor": {"temperature": {"value": 32}}, "headlights": True}
+    ]
+    df = normalize_selections(data)
+    
+    # API 필터 headlights_on: 1 조건과 일치하는지 확인
+    assert df.iloc[0]["headlights_on"] == 1
+
+def test_analyze_endpoint_empty_labels_consistency():
+    """analyze API: 라벨이 하나도 없는 영상이 rejection 처리가 아닌 '결과 없음'으로 나오는지 확인."""
+    merged_df = pd.DataFrame([{"video_id": 500}])
+    labels_df = pd.DataFrame(columns=["video_id", "object_class", "obj_count", "avg_confidence", "labeled_at"])
+    
+    final_df, stats = merge_with_labels(merged_df, labels_df)
+    
+    # 라벨 데이터 자체가 없으면 final_df는 비어있어야 하지만, error_map에는 없어야 함 (정상 누락)
+    assert len(final_df) == 0
+    assert 500 not in stats["error_map"]
+
+def test_search_api_complex_metadata_string():
+    """search API: JSON 내의 중첩된 필드가 올바른 포맷으로 직렬화되는지 확인."""
+    merged_df = pd.DataFrame([{"video_id": 37}])
+    labels_df = pd.DataFrame([
+        {"video_id": 37, "object_class": "traffic_light", "obj_count": 2, "avg_confidence": 0.86, "labeled_at": "T"}
+    ])
+    
+    final_df, _ = merge_with_labels(merged_df, labels_df)
+    
+    # Search API가 'traffic_light' 문자열로 검색할 수 있는지 JSON 구조 확인
+    labels_json = json.loads(final_df.iloc[0]["labels"])
+    assert "traffic_light" in labels_json
+    assert labels_json["traffic_light"]["count"] == 2
