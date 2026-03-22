@@ -65,10 +65,27 @@ def merge_selections_with_odds(selections_df, odds_df) -> Tuple[pd.DataFrame, li
 
 def merge_with_labels(merged_df, labels_df) -> Tuple[pd.DataFrame, Dict]:
     """
-    라벨 데이터를 언패킹하고 알파벳 순으로 정렬합니다.
-    - 정렬 순서: label_{object}_count, label_{object}_confidence 순서
+    라벨 데이터를 언패킹하고 CSV의 labeled_at을 보존하며 병합합니다.
+    - zero_obj_count 검증 로직을 제거하여 0개 객체 데이터도 허용합니다.
     """
-    # 1. Rejection Logic (기존 유지)
+    # 1. Rejection Logic (0개 카운트 제외)
+    
+    # 1-A. Duplicate Label Class
+    dup_mask = labels_df.duplicated(subset=["video_id", "object_class"], keep=False)
+    dup_vids = labels_df[dup_mask]["video_id"].unique()
+    dup_err_map = {vid: "duplicate_label_class" for vid in dup_vids}
+
+    # 1-B. Negative Object Count (음수는 여전히 오류로 처리)
+    negative_mask = (labels_df["obj_count"] < 0)
+    neg_vids = labels_df[negative_mask]["video_id"].unique()
+    neg_err_map = {vid: "negative_obj_count" for vid in neg_vids}
+
+    # 1-C. Non-integer Object Count
+    non_int_mask = (labels_df["obj_count"] % 1 != 0)
+    non_int_vids = labels_df[non_int_mask]["video_id"].unique()
+    non_int_err_map = {vid: "non_integer_obj_count" for vid in non_int_vids}
+
+    # 1-D. Invalid Object Class
     invalid_class_mask = (
         labels_df["object_class"].isna() | 
         (labels_df["object_class"].astype(str).str.strip() == "") |
@@ -77,46 +94,37 @@ def merge_with_labels(merged_df, labels_df) -> Tuple[pd.DataFrame, Dict]:
     invalid_class_vids = labels_df[invalid_class_mask]["video_id"].unique()
     class_err_map = {vid: "invalid_object_class" for vid in invalid_class_vids}
 
-    non_int_mask = (labels_df["obj_count"] % 1 != 0)
-    non_int_vids = labels_df[non_int_mask]["video_id"].unique()
-    non_int_err_map = {vid: "non_integer_obj_count" for vid in non_int_vids}
-
-    negative_mask = (labels_df["obj_count"] < 0)
-    neg_vids = labels_df[negative_mask]["video_id"].unique()
-    neg_err_map = {vid: "negative_obj_count" for vid in neg_vids}
-
-    dup_mask = labels_df.duplicated(subset=["video_id", "object_class"], keep=False)
-    dup_vids = labels_df[dup_mask]["video_id"].unique()
-    dup_err_map = {vid: "duplicate_label" for vid in dup_vids}
-
-    bad_vids = set(invalid_class_vids) | set(non_int_vids) | set(neg_vids) | set(dup_vids)
-    error_map = {**dup_err_map, **neg_err_map, **non_int_err_map, **class_err_map}
+    # 에러 맵 통합 (zero_obj_count 관련 로직 삭제됨)
+    error_map = {
+        **class_err_map,
+        **non_int_err_map,
+        **neg_err_map,
+        **dup_err_map
+    }
+    
+    bad_vids = set(error_map.keys())
 
     # 2. Cleaning
     clean_labels_df = labels_df[~labels_df["video_id"].isin(bad_vids)].copy()
     clean_labels_df["obj_count"] = clean_labels_df["obj_count"].astype(int)
     
-    # 3. Pivot 및 정렬 로직
-    # 카운트와 신뢰도를 각각 피벗
+    # CSV 원본 시간 보존용 맵핑
+    csv_time_map = clean_labels_df.groupby("video_id")["labeled_at"].first().reset_index()
+    
+    # 3. Pivot 및 정렬
     counts_pivot = clean_labels_df.pivot(index="video_id", columns="object_class", values="obj_count").fillna(0).astype(int)
     conf_pivot = clean_labels_df.pivot(index="video_id", columns="object_class", values="avg_confidence")
 
-    # 컬럼을 알파벳 순으로 생성 (Count -> Confidence 쌍)
     unique_objects = sorted(clean_labels_df["object_class"].unique())
     ordered_label_cols = []
     
     for obj in unique_objects:
         count_col = f"label_{obj}_count"
         conf_col = f"label_{obj}_confidence"
-        
-        # 실제 컬럼명 변경 적용
         counts_pivot.rename(columns={obj: count_col}, inplace=True)
         conf_pivot.rename(columns={obj: conf_col}, inplace=True)
-        
-        # 순서 리스트에 추가
         ordered_label_cols.extend([count_col, conf_col])
 
-    # 피벗 결과 병합 및 컬럼 순서 재배치
     combined_pivot = pd.concat([counts_pivot, conf_pivot], axis=1)
     combined_pivot = combined_pivot[ordered_label_cols]
     
@@ -130,6 +138,11 @@ def merge_with_labels(merged_df, labels_df) -> Tuple[pd.DataFrame, Dict]:
     # 4. 최종 병합
     final_df = merged_df.merge(labels_summary, on="video_id", how="inner")
     final_df = final_df.merge(combined_pivot.reset_index(), on="video_id", how="left")
+    
+    # labeled_at 복구 (CSV 원본 값 유지)
+    if "labeled_at" in final_df.columns:
+        final_df = final_df.drop(columns=["labeled_at"])
+    final_df = final_df.merge(csv_time_map, on="video_id", how="left")
     
     missing_ids = set(merged_df["video_id"]) - set(labels_summary["video_id"])
     stats = {
