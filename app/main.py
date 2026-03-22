@@ -348,10 +348,10 @@ def get_rejections(
     }
 
 
-@app.post("/search", tags=["Search"])
+@app.post("/search")
 async def search_data(
     page: int = Query(1, ge=1),
-    size: int = Query(10, ge=1, le=100),
+    size: int = Query(50, ge=1, le=100),
     filters: dict = Body(..., openapi_examples={
         "Comprehensive_Video3_Master": {
             "summary": "Video #3 전수 컬럼 검색 (참조용)",
