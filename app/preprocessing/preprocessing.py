@@ -101,7 +101,7 @@ def merge_with_labels(merged_df, labels_df) -> Tuple[pd.DataFrame, Dict]:
     counts_pivot = clean_labels_df.pivot(index="video_id", columns="object_class", values="obj_count").fillna(0).astype(int)
     conf_pivot = clean_labels_df.pivot(index="video_id", columns="object_class", values="avg_confidence")
 
-    # [수정 포인트] 컬럼을 알파벳 순으로 생성 (Count -> Confidence 쌍)
+    # 컬럼을 알파벳 순으로 생성 (Count -> Confidence 쌍)
     unique_objects = sorted(clean_labels_df["object_class"].unique())
     ordered_label_cols = []
     
