@@ -264,9 +264,9 @@ pip install fastapi uvicorn pandas
 2. 서버 실행 (프로젝트 루트 디렉토리 기준)
 uvicorn app.main:app --reload
 3. API 문서 접속
-
-서버 실행 후 브라우저에서 아래 주소로 접속합니다.
+4. 서버 실행 후 브라우저에서 아래 주소로 접속합니다.
 http://127.0.0.1:8000/docs
+5. API 엔드포인트별로 API를 실행하세요
 
 7.2 주요 엔드포인트 활용법
 1️⃣ POST /analyze 모든 데이터 프로세싱의 시작점입니다. 분산된 CSV/JSON 소스를 읽어 무결성을 검증하고 관계형 DB(SQLite)에 적재합니다.
