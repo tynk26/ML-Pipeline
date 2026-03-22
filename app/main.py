@@ -134,17 +134,25 @@ async def analyze():
         # --- STAGE 3: DB 적재 ---
         conn = sqlite3.connect(DB_PATH)
         
-        # Rejections 저장
+        # 1. Rejections 테이블 (사후 분석을 위해 raw_data 유지)
         if rejection_frames:
             all_rejections_df = pd.concat(rejection_frames, ignore_index=True)
             all_rejections_df.to_sql("rejections", conn, if_exists="replace", index=False)
         else:
             pd.DataFrame(columns=["video_id", "stage", "reason", "raw_data"]).to_sql("rejections", conn, if_exists="replace", index=False)
 
-        # [핵심 수정] 언패킹된 integrated_df를 DB에 저장
-        # 이 데이터프레임에는 label_car_count, headlights_on, temperature_celsius 등이 모두 포함됨
-        integrated_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
-        
+        # 2. Integrated Data 테이블 (raw_data 제거 후 적재)
+        # [수정된 부분]
+        if not integrated_df.empty:
+            # raw_data 컬럼이 존재할 경우에만 삭제하여 에러 방지
+            final_storage_df = integrated_df.drop(columns=['raw_data'], errors='ignore')
+            final_storage_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
+        else:
+            # 데이터가 없을 경우 스키마만 생성 (raw_data 제외)
+            # integrated_df의 컬럼 중 raw_data를 뺀 리스트 사용
+            cols = [c for c in integrated_df.columns if c != 'raw_data']
+            pd.DataFrame(columns=cols).to_sql("integrated_data", conn, if_exists="replace", index=False)
+
         conn.close()
 
         # --- STAGE 4: Statistical Report ---
