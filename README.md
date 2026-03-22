@@ -53,6 +53,18 @@ Pydantic을 이용한 데이터 검증과 Swagger UI(/docs) 자동 생성 기능
 선택 이유: 복잡한 데이터 프레임의 병합(Merge), 정규화(Normalization), 그리고 거부된 데이터(Rejections)의 통계 처리를 위해 파이썬 표준 데이터 분석 라이브러리인 Pandas를 사용했습니다.  
 수천 건의 JSON/CSV 데이터를 고속으로 로드하고, 벡터화 연산(Vectorized Operations)을 통해 데이터 프레임 병합 및 통계 처리를 수행합니다.
 
+### 3.4 Data Validation & Serialization: Pydantic v2
+
+선택 이유: 자율주행 데이터는 센서 값의 누락이나 잘못된 데이터 타입이 치명적일 수 있습니다. Pydantic을 활용하여 API로 들어오는 중첩된 JSON 구조(Nested JSON)를 런타임 이전에 엄격하게 검증함으로써, 데이터 분석 단계(Pandas)에서 발생할 수 있는 잠재적 에러를 사전 차단합니다. 또한, 복잡한 DB 모델을 클라이언트에 최적화된 형태로 직렬화(Serialization)하는 데 핵심적인 역할을 합니다.
+
+### 3.5 Database Connector: SQLAlchemy & Dynamic Query Builder
+
+선택 이유: 단순한 고정 쿼리가 아닌, 사용자의 선택에 따라 수십 가지 필터 조합이 생성되는 '샌드위치(Range) 검색' 로직을 안전하게 구현하기 위해 도입했습니다. Raw SQL을 직접 작성할 때 발생할 수 있는 SQL Injection 위험을 방지하고, 파이썬 객체 지향적인 방식으로 데이터베이스를 조작하여 코드의 유지보수성을 높였습니다.
+
+### 3.6 API Documentation & Testing: Swagger UI (OpenAPI)
+
+선택 이유: FastAPI에서 제공하는 자동 문서화 기능을 통해 별도의 문서 작성 없이도 /search 엔드포인트의 다양한 필터(온도, 조도, 객체 수 등)를 즉시 테스트할 수 있습니다. 이는 백엔드 로직 수정 시 프론트엔드 혹은 데이터 팀과의 협업 비용을 최소화하며, 개발 주기를 단축시키는 핵심 요소입니다.
+
 ---
 
 # 🔄 4. 데이터 분석 & DB 적재
