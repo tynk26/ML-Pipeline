@@ -28,14 +28,6 @@ app = FastAPI(
 )
 
 DB_PATH = "ml_data.db"
-import pandas as pd
-import sqlite3
-import os
-import json
-from fastapi import APIRouter, HTTPException, Query
-from typing import Optional
-
-router = APIRouter()
 
 @app.post("/analyze")
 async def analyze():
@@ -72,29 +64,34 @@ async def analyze():
     * **Label Density Analysis (avg_labels_per_video):** 영상당 평균 객체 수를 산출하여 데이터의 복잡도(Complexity)를 파악합니다.
     """
     if os.path.exists(DB_PATH):
-        return {"message": "데이터베이스가 이미 존재합니다."}
+        # 기존 DB가 있다면 삭제 후 갱신 (스키마 변경 반영)
+        os.remove(DB_PATH)
 
     try:
-        selections_raw, odds_df, labels_df = load_all()
+        # 1. 데이터 로드 및 초기 전처리 (preprocessing.py 활용)
+        selections_raw, odds_raw_df, labels_raw_df = load_all()
+        
+        # [수정] preprocessing.py의 로직을 사용하여 정규화된 데이터셋 생성
+        # 이 단계에서 headlights_on, temperature_celsius 등이 생성됨
         sel_df = normalize_selections(selections_raw)
         
-        # Waterfall 제어를 위한 생존자 명단
         current_survivor_ids = set(sel_df["video_id"])
         rejection_frames = []
 
-        # --- STAGE 1: ODD Step ---
-        odds_ids = set(odds_df["video_id"])
+        # --- STAGE 1: ODD Step (Waterfall) ---
+        # [수정] preprocessing.py의 merge_selections_with_odds 로직을 Waterfall에 맞게 이식
+        odds_ids = set(odds_raw_df["video_id"])
         
         # 1-A. Missing ODD
         missing_odd_ids = current_survivor_ids - odds_ids
         if missing_odd_ids:
             tmp = sel_df[sel_df["video_id"].isin(missing_odd_ids)].copy()
             tmp["reason"], tmp["stage"] = "missing_odd_metadata", "odd_tagging_step"
-            rejection_frames.append(tmp[["video_id", "stage", "reason", "raw_data"]]) # 필요한 컬럼만 추출
+            rejection_frames.append(tmp[["video_id", "stage", "reason", "raw_data"]])
             current_survivor_ids -= missing_odd_ids
 
         # 1-B. Duplicate ODD
-        duplicate_odd_ids = set(odds_df[odds_df.duplicated("video_id")]["video_id"]) & current_survivor_ids
+        duplicate_odd_ids = set(odds_raw_df[odds_raw_df.duplicated("video_id")]["video_id"]) & current_survivor_ids
         if duplicate_odd_ids:
             tmp = sel_df[sel_df["video_id"].isin(duplicate_odd_ids)].copy()
             tmp["reason"], tmp["stage"] = "duplicate_odd_metadata", "odd_tagging_step"
@@ -102,8 +99,9 @@ async def analyze():
             current_survivor_ids -= duplicate_odd_ids
 
         # --- STAGE 2: Labeling Step ---
+        # [수정] preprocessing.py의 merge_with_labels 로직을 Waterfall에 통합
         # 2-A. Missing Label
-        labels_ids = set(labels_df["video_id"])
+        labels_ids = set(labels_raw_df["video_id"])
         missing_label_ids = current_survivor_ids - labels_ids
         if missing_label_ids:
             tmp = sel_df[sel_df["video_id"].isin(missing_label_ids)].copy()
@@ -111,78 +109,82 @@ async def analyze():
             rejection_frames.append(tmp[["video_id", "stage", "reason", "raw_data"]])
             current_survivor_ids -= missing_label_ids
 
-        # 2-B. Labeling Integrity
-        survivor_labels = labels_df[labels_df["video_id"].isin(current_survivor_ids)]
-        error_map = {}
-        for vid, group in survivor_labels.groupby("video_id"):
-            reasons = []
-            if group["obj_count"].sum() == 0: reasons.append("zero_obj_count")
-            if (group["obj_count"] < 0).any(): reasons.append("negative_obj_count")
-            if (group["obj_count"] % 1 != 0).any(): reasons.append("non_integer_obj_count")
-            if group.duplicated("object_class").any(): reasons.append("duplicate_label_class")
-            
-            if reasons:
-                error_map[vid] = " & ".join(sorted(reasons))
+        # 2-B. Labeling Integrity & Unpacking
+        # 생존자들에 대해서만 라벨 검증 진행
+        survivor_labels = labels_raw_df[labels_raw_df["video_id"].isin(current_survivor_ids)]
+        
+        # [수정] preprocessing.py의 merge_with_labels 내부 로직을 적용하여 최종 통합본 생성
+        # 1. 먼저 생존한 ODD 데이터와 Selections 병합
+        clean_odds = odds_raw_df[odds_raw_df["video_id"].isin(current_survivor_ids)]
+        merged_odd_sel = sel_df[sel_df["video_id"].isin(current_survivor_ids)].merge(clean_odds, on="video_id")
+        
+        # 2. 라벨 통합 및 언패킹 호출
+        # merge_with_labels 함수는 Pivot을 통해 label_{obj}_count 컬럼들을 생성함
+        integrated_df, label_stats = merge_with_labels(merged_odd_sel, survivor_labels)
 
-        if error_map:
-            tmp = sel_df[sel_df["video_id"].isin(error_map.keys())].copy()
-            tmp["reason"] = tmp["video_id"].map(error_map)
+        # 3. 라벨 에러 데이터 격리 처리
+        if label_stats["error_map"]:
+            bad_vids = label_stats["error_map"].keys()
+            tmp = sel_df[sel_df["video_id"].isin(bad_vids)].copy()
+            tmp["reason"] = tmp["video_id"].map(label_stats["error_map"])
             tmp["stage"] = "auto_labeling_step"
             rejection_frames.append(tmp[["video_id", "stage", "reason", "raw_data"]])
-            current_survivor_ids -= set(error_map.keys())
+            # integrated_df는 이미 내부적으로 bad_vids가 제외된 상태임
 
-        # --- STAGE 3: DB 적재 (Minimal Columns) ---
+        # --- STAGE 3: DB 적재 ---
         conn = sqlite3.connect(DB_PATH)
         
+        # Rejections 저장
         if rejection_frames:
-            # Waterfall에 의해 중복이 제거되었으므로 단순 병합
             all_rejections_df = pd.concat(rejection_frames, ignore_index=True)
-            # 최종 확인: video_id, stage, reason, raw_data 4개 컬럼만 저장
             all_rejections_df.to_sql("rejections", conn, if_exists="replace", index=False)
         else:
-            # 데이터가 없을 경우 스키마만 생성
             pd.DataFrame(columns=["video_id", "stage", "reason", "raw_data"]).to_sql("rejections", conn, if_exists="replace", index=False)
 
-        # Integrated Data 저장 (ODD + Labels 합본)
-        final_df = odds_df[odds_df["video_id"].isin(current_survivor_ids)].merge(labels_df, on="video_id")
-        final_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
+        # [핵심 수정] 언패킹된 integrated_df를 DB에 저장
+        # 이 데이터프레임에는 label_car_count, headlights_on, temperature_celsius 등이 모두 포함됨
+        integrated_df.to_sql("integrated_data", conn, if_exists="replace", index=False)
         
         conn.close()
 
-        # --- STAGE 4: ML Pipeline Augmented Analysis ---
-        unique_final_vids = final_df.drop_duplicates('video_id')
-        total_vids_count = len(unique_final_vids)
-
+        # --- STAGE 4: Statistical Report ---
+        total_vids_count = len(integrated_df)
+        
+        # 라벨 분포 계산 (preprocessing에서 생성된 컬럼 활용)
+        count_cols = [c for c in integrated_df.columns if c.startswith("label_") and c.endswith("_count")]
         class_presence = {}
         if total_vids_count > 0:
-            for cls in final_df['object_class'].unique():
-                presence_count = final_df[final_df['object_class'] == cls]['video_id'].nunique()
-                class_presence[cls] = f"{(presence_count / total_vids_count) * 100:.2f}%"
+            for col in count_cols:
+                cls_name = col.replace("label_", "").replace("_count", "")
+                presence_count = (integrated_df[col] > 0).sum()
+                class_presence[cls_name] = f"{(presence_count / total_vids_count) * 100:.2f}%"
 
-        obj_counts_per_vid = final_df.groupby('video_id')['obj_count'].sum()
+        # 복잡도 통계
+        obj_counts_per_vid = integrated_df[count_cols].sum(axis=1) if not integrated_df.empty else pd.Series()
         complexity_stats = {
             "low_complexity (1-5 objects)": int((obj_counts_per_vid <= 5).sum()),
             "mid_complexity (6-15 objects)": int(((obj_counts_per_vid > 5) & (obj_counts_per_vid <= 15)).sum()),
             "high_complexity (16+ objects)": int((obj_counts_per_vid > 15).sum())
         }
 
-        env_combos = unique_final_vids.groupby(['weather', 'time_of_day']).size().to_dict()
-        formatted_combos = {f"{k[0]} | {k[1]}": v for k, v in env_combos.items()}
-
-        weather_pct = unique_final_vids['weather'].value_counts(normalize=True).mul(100).round(2).to_dict()
-        tod_pct = unique_final_vids['time_of_day'].value_counts(normalize=True).mul(100).round(2).to_dict()
+        # 기상/시간 분포 (unique_final_vids 대신 integrated_df 사용)
+        weather_pct = integrated_df['weather'].value_counts(normalize=True).mul(100).round(2).to_dict() if not integrated_df.empty else {}
+        tod_pct = integrated_df['time_of_day'].value_counts(normalize=True).mul(100).round(2).to_dict() if not integrated_df.empty else {}
+        
+        env_combos = integrated_df.groupby(['weather', 'time_of_day']).size().to_dict() if not integrated_df.empty else {}
+        formatted_combos = {f"{k[0]} | {k[1]}": f"{(v/total_vids_count)*100:.2f}%" for k, v in env_combos.items()}
 
         return {
             "status": "success",
             "analysis_report": {
                 "total_input_videos": len(sel_df),
                 "integrated_videos": total_vids_count,
-                "integration_rate": f"{(total_vids_count/len(sel_df))*100:.2f}%",
-                "total_rejections": len(all_rejections_df),
-                "rejection_by_stage": all_rejections_df["stage"].value_counts().to_dict() if not all_rejections_df.empty else {},
-                "rejection_by_reason": all_rejections_df["reason"].value_counts().to_dict() if not all_rejections_df.empty else {},
+                "integration_rate": f"{(total_vids_count/len(sel_df))*100:.2f}%" if len(sel_df) > 0 else "0.00%",
+                "total_rejections": len(all_rejections_df) if rejection_frames else 0,
+                "rejection_by_stage": all_rejections_df["stage"].value_counts().to_dict() if rejection_frames else {},
+                "rejection_by_reason": all_rejections_df["reason"].value_counts().to_dict() if rejection_frames else {},
                 "statistical_report": {
-                    "object_class_frequency": final_df['object_class'].value_counts().to_dict(),
+                    "object_class_frequency": class_presence, # 언패킹된 데이터 기준
                     "label_class_distribution": class_presence,
                     "scene_complexity_distribution": complexity_stats,
                     "environment_report": {
@@ -190,15 +192,15 @@ async def analyze():
                         "time_of_day_distribution": tod_pct,
                         "scenario_distribution": formatted_combos
                     },
-                    "avg_labels_per_video": round(len(final_df) / total_vids_count, 2) if total_vids_count > 0 else 0
+                    "avg_labels_per_video": round(obj_counts_per_vid.mean(), 2) if total_vids_count > 0 else 0
                 }
             }
         }
 
     except Exception as e:
-        if os.path.exists(DB_PATH): os.remove(DB_PATH)
+        # 에러 발생 시 커넥션이 열려있다면 닫기 (conn 객체 체크 필요)
         raise HTTPException(status_code=500, detail=f"Pipeline Failure: {str(e)}")
-
+    
 @app.get("/rejections")
 def get_rejections(
     stage: Optional[str] = Query(
@@ -242,11 +244,11 @@ def get_rejections(
 
     ## 3. Response
     - status (str): 요청 처리 성공 여부 (success/error).
-    - overall_stats (dict): 필터링 조건과 관계없는 전체 격리 데이터의 거시적 통계.
+    - rejection_stats (dict): 필터링 조건과 관계없는 전체 격리 데이터의 거시적 통계.
         * total_rejections: 파이프라인에서 제외된 총 영상 수.
-        * by_stage: 각 단계(Stage 1 & 2)에서 발생한 탈락 수.
-        * by_reason: 세부 결함 사유별 발생 빈도(Distribution).
-    - metadata (dict): 현재 필터링된 결과에 대한 페이지네이션 정보 (filtered_total, total_pages 등).
+        * by_stage: 각 단계(Odd & Labeling)에서 발생한 탈락 수.
+        * by_reason: 각 사유별로 발생한 탈락 수.
+    - filtered_rejections (dict): 현재 필터링된 결과에 대한 페이지네이션 정보 (filtered_total, total_pages 등).
     - items (list): 거절된 데이터의 상세 객체 리스트.
         * video_id: 영상 식별자.
         * stage: 거절 단계 
@@ -321,7 +323,7 @@ def get_rejections(
     
     return {
         "status": "success",
-        "overall_stats": overall_stats,
+        "rejection_stats": overall_stats,
         "filtered_rejections": {
             "filtered_total": filtered_total,
             "page": page,
@@ -330,63 +332,113 @@ def get_rejections(
         },
         "items": items
     }
-
 @app.post("/search", tags=["Search"])
-def search_data(
+async def search_data(
+    page: int = Query(1, ge=1, description="페이지 번호"),
+    size: int = Query(10, ge=1, le=100, description="페이지당 결과 수"),
     filters: dict = Body(..., openapi_examples={
-        "Video_3_Full_Confidence": {
-            "summary": "Video 3 마스터 검색 (Confidence 필터 포함)",
+        "Master_Search": {
+            "summary": "복합 필터 검색 예시",
             "value": {
-                "video_id_min": 3, "video_id_max": 3,
-                "weather": "sunny", "time_of_day": "night", "road_surface": "dry",
-                "wiper_on": 1, "headlights_on": 1,
-                "wiper_level_min": 3, "wiper_level_max": 3,
-                "label_car_min": 31, "label_car_max": 31,
-                "label_car_confidence_min": 0.8, "label_car_confidence_max": 0.9,
-                "label_pedestrian_min": 11, "label_pedestrian_confidence_min": 0.7
+                "weather": "sunny",
+                "label_car_min": 5,
+                "label_car_confidence_min": 0.8,
+                "wiper_on": False,
+                "headlights_on": True
             }
         }
     })
 ):
-    if not os.path.exists(DB_PATH): raise HTTPException(status_code=503, detail="DB 미초기화")
-    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row; cursor = conn.cursor()
+    """
+    ## `POST /search`
+    통합 데이터베이스에서 조건에 맞는 데이터를 검색합니다.
+    - **Pagination**: `page`와 `size` 쿼리 파라미터로 제어합니다.
+    - **Dynamic Filtering**: ODD 조건 및 Unpacked Label 조건을 조합할 수 있습니다.
+    """
+    if not os.path.exists(DB_PATH):
+        raise HTTPException(status_code=503, detail="데이터베이스가 존재하지 않습니다. /analyze를 먼저 실행하세요.")
 
-    query = "SELECT * FROM integrated_data WHERE 1=1"
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+
+    # 1. Base Query (raw_data는 성능을 위해 제외)
+    # 필요한 모든 컬럼을 명시하거나, 이미 /analyze에서 정리된 integrated_data 사용
+    where_clauses = ["1=1"]
     params = []
 
-    # 1. DIRECT MATCHES
-    direct_cols = ["weather", "time_of_day", "road_surface", "headlights_on", "wiper_on"]
-    for col in direct_cols:
-        if col in filters and filters[col] is not None:
-            query += f" AND {col} = ?"; params.append(filters[col])
-
-    # 2. RANGE MATCHES
-    range_fields = ["video_id", "id", "temperature_fahrenheit", "temperature_celsius", "wiper_level", "recorded_at"]
+    # 2. 필터 로직 처리
     for key, val in filters.items():
-        if val is None or val == "": continue
-        target_col = None
+        if val is None or val == "":
+            continue
 
-        if key.startswith("label_"):
+        # A. 직접 일치 (Direct Match - ODD 필드)
+        direct_cols = ["weather", "time_of_day", "road_surface", "headlights_on", "wiper_on"]
+        if key in direct_cols:
+            if isinstance(val, bool):
+                val = 1 if val else 0
+            where_clauses.append(f"{key} = ?")
+            params.append(val)
+
+        # B. 범위 검색 (Range Match - Label 및 수치형)
+        elif key.endswith(("_min", "_max")):
+            is_min = key.endswith("_min")
             base_key = key.replace("_min", "").replace("_max", "")
-            target_col = base_key if "confidence" in base_key else f"label_{base_key.replace('label_', '')}_count"
-        else:
-            for field in range_fields:
-                if key.startswith(field):
-                    target_col = field; break
+            
+            target_col = None
+            # Label 관련 (label_car_min -> label_car_count)
+            if base_key.startswith("label_"):
+                if "confidence" in base_key:
+                    target_col = base_key # label_car_confidence
+                else:
+                    target_col = f"{base_key}_count" # label_car_count
+            # 일반 수치형 (temperature_celsius_min -> temperature_celsius)
+            else:
+                target_col = base_key
 
-        if target_col:
-            try:
-                clean_val = val if target_col == "recorded_at" else float(val)
-                if key.endswith("_min"): query += f" AND {target_col} >= ?"; params.append(clean_val)
-                elif key.endswith("_max"): query += f" AND {target_col} <= ?"; params.append(clean_val)
-            except ValueError: continue
+            operator = ">=" if is_min else "<="
+            where_clauses.append(f"{target_col} {operator} ?")
+            params.append(val)
 
-    cursor.execute(query, params)
+    # 3. 쿼리 조립
+    where_stmt = " AND ".join(where_clauses)
+    
+    # 전체 개수 확인 (페이지네이션 계산용)
+    count_query = f"SELECT COUNT(*) FROM integrated_data WHERE {where_stmt}"
+    cursor.execute(count_query, params)
+    total_found = cursor.fetchone()[0]
+
+    # 실제 데이터 조회 (LIMIT/OFFSET 적용)
+    offset = (page - 1) * size
+    # [성능 최적화] * 대신 필요한 컬럼만 나열하는 것이 좋으나, 편의상 * 사용 (raw_data는 이미 /analyze 단계에서 제거 권장)
+    search_query = f"""
+        SELECT * FROM integrated_data 
+        WHERE {where_stmt} 
+        LIMIT ? OFFSET ?
+    """
+    cursor.execute(search_query, params + [size, offset])
     rows = [dict(row) for row in cursor.fetchall()]
+
+    # 4. JSON 필드 복원 (labels 등)
     for r in rows:
-        if r.get("labels"): r["labels"] = json.loads(r["labels"])
+        if "labels" in r and r["labels"]:
+            try:
+                r["labels"] = json.loads(r["labels"])
+            except:
+                pass
+
     conn.close()
-    return {"total_found": len(rows), "results": rows}
+
+    return {
+        "status": "success",
+        "pagination": {
+            "page": page,
+            "size": size,
+            "total_found": total_found,
+            "total_pages": (total_found + size - 1) // size if total_found > 0 else 0
+        },
+        "results": rows
+    }
 
 @app.get("/joined_data", tags=["View"])
 def get_joined_data():
