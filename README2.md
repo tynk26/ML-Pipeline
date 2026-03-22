@@ -1,9 +1,10 @@
-🚗 자율주행 데이터 통합 및 검색 API 시스템 (ML Data SQL API)
+# 🚗 자율주행 데이터 통합 및 검색 API 시스템 (ML Data SQL API)
+
 본 프로젝트는 자율주행 차량에서 수집된 센서 데이터(odds.csv), 객체 인식 결과(labels.csv), 그리고 원본 선택 (selections.json) 데이터를 통합하여 정제된 학습용 데이터셋을 구축하고 관리하는 RESTful API 서버입니다.
 
 ---
 
-📋 1. 프로젝트 개요
+# 📋 1. 프로젝트 개요
 
 자율주행 데이터는 날씨, 온도 등 정형 데이터와 객체 카운트와 같은 비정형 데이터가 혼재되어 있습니다.  
 본 시스템은 데이터 파이프라인(analyze)을 통해 오류 데이터를 자동으로 분류(Rejection)하고, 통합된 데이터를 사용자가 원하는 정밀한 조건(Sandwich Search)으로 검색할 수 있게 설계되었습니다.
@@ -54,7 +55,7 @@ Raw Data
 
 ---
 
-🛠 3. 기술 스택 (Tech Stack) 및 선택 이유
+# 🛠 3. 기술 스택 (Tech Stack) 및 선택 이유
 
 ### 3.1 Framework: FastAPI
 
@@ -73,7 +74,7 @@ Pydantic을 이용한 데이터 검증과 Swagger UI(/docs) 자동 생성 기능
 
 ---
 
-🔄 4. 데이터 분석 & DB 적재
+# 🔄 4. 데이터 분석 & DB 적재
 
 #### `POST /analyze` : 세 파일의 데이터를 분석하여 DB에 적재합니다.
 
@@ -129,7 +130,7 @@ Pydantic을 이용한 데이터 검증과 Swagger UI(/docs) 자동 생성 기능
   - scenario_distribution: 기상과 시간대의 조합별로 학습 데이터가 어떻게 분포되어 있는지 분석합니다.
 - Label Density Analysis (avg_labels_per_video): 영상당 평균 객체 수를 산출하여 데이터의 복잡도(Complexity)를 파악합니다.
 
-🔍 5. 거부 데이터 추적 및 조회 (Rejection Tracking)
+# 🔍 5. 거부 데이터 추적 및 조회 (Rejection Tracking)
 
 ### `GET /rejections`: 정제 과정에서 제외된 데이터 목록을 상세 사유와 함께 조회합니다.
 
