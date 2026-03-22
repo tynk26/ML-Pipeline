@@ -246,6 +246,8 @@ POST /analyze 파이프라인 실행 중 **순차적 검증(Sequential Validatio
     }
   ]
 }
+```
+
 # 🔍 6. 통합 데이터 필터 검색 (Filtered Search)
 
 # `POST /search` : 복합 조건을 조합하여 integrated_data를 정밀 필터링합니다.
@@ -253,6 +255,7 @@ POST /analyze 파이프라인 실행 중 **순차적 검증(Sequential Validatio
 ### 6.1 개요 (Overview)
 
 # 📡7. API 엔드포인트 상세 실행 가이드
+
 설치 및 실행 (Quick Start)
 의존성 설치
 pip install fastapi uvicorn pandas
@@ -261,31 +264,30 @@ uvicorn app.main:app --reload
 API 문서 접속
 서버 실행 후 Swagger UI (http://127.0.0.1:8000/docs) 접속을 합니다.
 
-#1.  데이터 분석 및 적재 실행: `POST /analyze`
-##모든 작업의 시작점입니다. 원본 데이터를 로드하고 통합 DB를 생성합니다.
+#1. 데이터 분석 및 적재 실행: `POST /analyze` ##모든 작업의 시작점입니다. 원본 데이터를 로드하고 통합 DB를 생성합니다.
 실행 방법: Try it Out --> Execute 버튼 클릭.
 작동 원리: odd_tagging 단계와 auto_labeling 단계를 거쳐 메타데이터가 누락되거나 중복된 데이터를 rejections 테이블로 분리하고, 정상 데이터는 integrated_data에 저장합니다.
 결과: 통합된 데이터 개수와 거부 사유별 통계를 반환합니다.
 
-#2. Rejections 조회: `GET /rejections`
-##정제 과정에서 거부된 데이터 목록을 조회합니다.
+#2. Rejections 조회: `GET /rejections` ##정제 과정에서 거부된 데이터 목록을 조회합니다.
 파라미터: reason(거부 사유), stage(발생 단계), page, size.
 실행 예시: reason=missing_odd_metadata 입력 시 메타데이터가 없어 제외된 리스트만 출력됩니다. (페이지네이션 지원)
 
-#3.데이터 검색: `POST/search`
-## 정제·통합 완료된 데이터를 다양한 조건으로 필터링하여 조회할 수 있습니다
+#3.데이터 검색: `POST/search` ## 정제·통합 완료된 데이터를 다양한 조건으로 필터링하여 조회할 수 있습니다
+
 Sample Request:
 {
-  "video_id_min": 3,
-  "video_id_max": 3,
-  "weather": "sunny",
-  "wiper_level_min": 3,
-  "wiper_level_max": 3,
-  "label_car_min": 31,
-  "label_car_max": 31,
-  "label_pedestrian_min": 11
+"video_id_min": 3,
+"video_id_max": 3,
+"weather": "sunny",
+"wiper_level_min": 3,
+"wiper_level_max": 3,
+"label_car_min": 31,
+"label_car_max": 31,
+"label_pedestrian_min": 11
 }
-특징: 모든 수치형 데이터와 라벨 카운트 필드에 대해 _min, _max 접미사를 사용하여 유연한 쿼리가 가능합니다.
+특징: 모든 수치형 데이터와 라벨 카운트 필드에 대해 \_min, \_max 접미사를 사용하여 유연한 쿼리가 가능합니다.
 
+```
 
 ```
