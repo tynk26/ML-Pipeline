@@ -407,9 +407,9 @@ async def search_data(
                 "label_truck_confidence_min": 0.94,
                 "label_truck_confidence_max": 0.95,
 
-                # 5. 시간 범위 필터 (Temporal Sandwich)
-                "recorded_at_min": "2026-01-10 10:44:00",
-                "recorded_at_max": "2026-01-10 10:45:00"
+                #5. [중요] KST 시간 범위 필터 
+                "recorded_at_min": "2026-01-10T00:00:00",
+                "recorded_at_max": "2026-01-12T23:59:59"
             }
         }
     })
@@ -450,21 +450,30 @@ async def search_data(
             is_min = key.endswith("_min")
             base_key = key.replace("_min", "").replace("_max", "")
             
-            target_col = None
+            # 컬럼명 결정 (기존 로직 유지)
+            target_col = base_key
             if base_key.startswith("label_"):
-                # label_car_confidence_min -> label_car_confidence
-                if "confidence" in base_key:
-                    target_col = base_key
-                # label_car_min -> label_car_count
-                else:
-                    target_col = f"{base_key}_count"
+                target_col = base_key if "confidence" in base_key else f"{base_key}_count"
+
+            # [시간 검색 핵심 수정]
+            if target_col in ["recorded_at", "labeled_at"] and isinstance(val, str):
+                # 1. 입력값 정규화 (공백을 T로 치환)
+                clean_val = val.replace(" ", "T")
+                
+                # 2. 입력값의 길이를 계산 (예: '2026-01-11T06:58:00' 이면 19자)
+                val_len = len(clean_val)
+                
+                # 3. DB의 데이터도 동일한 길이만큼 잘라서 비교 (substr 사용)
+                # 이렇게 하면 DB의 '+0900' 부분을 무시하고 앞부분 시간만 비교합니다.
+                op = ">=" if is_min else "<="
+                where_clauses.append(f"substr({target_col}, 1, {val_len}) {op} ?")
+                params.append(clean_val)
+                
             else:
-                # video_id, temperature_celsius 등
-                target_col = base_key
-
-            op = ">=" if is_min else "<="
-            where_clauses.append(f"{target_col} {op} ?"); params.append(val)
-
+                # 일반 숫자형 데이터 처리
+                op = ">=" if is_min else "<="
+                where_clauses.append(f"{target_col} {op} ?")
+                params.append(val)
     # 쿼리 조립 및 실행
     where_stmt = " AND ".join(where_clauses)
     count_query = f"SELECT COUNT(*) FROM integrated_data WHERE {where_stmt}"
