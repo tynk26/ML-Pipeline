@@ -37,36 +37,39 @@ from typing import Optional
 
 router = APIRouter()
 
-@app.post("/analyze", tags=["Pipeline"])
+@app.post("/analyze")
 async def analyze():
     """
     ### 데이터 분석 및 DB 적재 
     
     ### 이 엔드포인트는 원본 데이터셋을 전수 조사하여 학습 가용 데이터를 추출하고 품질 미달 및 오류 데이터를 격리합니다.
     
-    **1. 데이터 통합 및 정제 요약 (Processing Summary):** 전체 입력 데이터 중 결함을 걸러내고 최종 학습에 투입 가능한 유효 데이터의 총량과 정제 효율을 정량적으로 증명하는 지표입니다.**
+    **1. Status:** 데이터 처리의 성공 여부를 나타내는 필드입니다. "success" 또는 "error"로 반환됩니다.
+    
+    **2. 데이터 통합 및 정제 요약 (Processing Summary):** 전체 입력 데이터 중 결함을 걸러내고 최종 학습에 투입 가능한 유효 데이터의 총량과 정제 효율을 정량적으로 증명하는 지표입니다.
     * **Total Input Videos:** 원본 데이터셋에 존재하는 총 영상 수입니다.
     * **Integrated Videos:** ODD와 LABELING데이터가 모두 존재하고, 데이터 무결성 검사를 통과한 최종 학습용 영상 수입니다.
     * **Integration Rate:** 전체 입력 대비 최종 통합된 영상의 비율로, 데이터 품질과 정제 효율을 나타냅니다.
     * **Total Rejections:** ODD 매칭 실패, LABELING 누락, 객체 수 오류 등으로 거절된 영상의 총 수입니다.
 
-    **2. 단계별 격리 처리 (Rejection by Stage):** 각 처리 단계(ODD 매칭, 라벨링 검증)별로 거절된 영상 수를 집계하여 어느 단계에서 문제가 발생하는지 파악합니다.
+    **3. 단계별 격리 처리 (Rejection by Stage):** 각 처리 단계(ODD 매칭, 라벨링 검증)별로 거절된 영상 수를 집계하여 어느 단계에서 문제가 발생하는지 파악합니다.
     * 모든 거절 데이터는 발생 지점에 따라 `odd_tagging_step` 또는 `auto_labeling_step`으로 분류되어 기록됩니다.
 
-    **3. 캡처하는 예외 케이스 (Rejection By Reason):** 거절 사유별로 집계하여 어떤 유형의 오류가 가장 빈번한지 분석합니다.
-    * **Stage 1 (ODD DATA):** 메타데이터 누락(`missing_odd_metadata`).
+    **4. 캡처하는 예외 케이스 (Rejection By Reason):** 거절 사유별로 집계하여 어떤 유형의 오류가 가장 빈번한지 분석합니다.
+    * **Stage 1 (ODD DATA):** ODD 데이터 누락(`missing_odd_metadata`).
     * **Stage 1 (ODD INTEGRITY):** ODD ID 중복(`duplicate_odd_metadata`).
-    * **Stage 2 (LABELING DATA):** 라벨 파일 누락(`missing_label_data`).
-    * **Stage 2 (LABELING INTEGRITY):** 객체 수 0(`zero_obj_count`), 음수(`negative_obj_count`), 실수(`non_integer_obj_count`), 클래스 중복(`duplicate_label_class`).
-    
-    **4. 거부 사유 병합 논리:** 한 비디오가 여러 단계에서 중복 오류를 가질 경우, `rejections` 테이블에는 `&`로 연결된 단일 문자열로 저장됩니다.
-    * 예: `duplicate_odd_metadata & missing_label_data`
+    * **Stage 2 (LABELING DATA):** LABEL 파일 누락(`missing_label_data`).
+    * **Stage 2 (LABELING INTEGRITY):** LABEL 객체 수 0(`zero_obj_count`), 음수(`negative_obj_count`), 실수(`non_integer_obj_count`), 클래스 중복(`duplicate_label_class`).
     
     **5. 통계 분석 (Statistical Report):** 최종 통합된 데이터셋에 대한 통계 분석을 통해 학습 데이터의 특성과 편향성을 파악합니다.
+    * **Object Class Frequency:** 각 객체 클래스(예: 자동차, 보행자 등)가 전체 영상에서 얼마나 자주 등장하는지 분석하여 클래스 불균형 문제를 탐지합니다.
     * **Label Class Distribution:** 각 객체 클래스가 전체 영상 중 몇 퍼센트의 영상에 출현하는지 분석합니다. 특정 배경에만 객체가 편중되어 학습되는 '배경 편향성'을 탐지하는 데 사용됩니다.
     * **Scene Complexity Distribution:** 영상 내 총 객체 수를 기준으로 저/중/고밀도 상황을 분류합니다. 모델이 혼잡한 환경에서 성능이 얼마나 유지되는지 테스트하기 위한 벤치마크 데이터셋 구성의 근거가 됩니다.
     * **Environment Report:** 기상, 시간대, 노면 상태별 비중(%)을 계산하여 학습 데이터의 편향성을 수치화합니다.
-    * **Label Density Analysis:** 영상당 평균 객체 수를 산출하여 데이터의 복잡도(Complexity)를 파악합니다.
+        - weather_distribution: 맑음, 비, 눈 등 다양한 기상 조건이 학습 데이터에 어떻게 분포되어 있는지 분석합니다.
+        - time_of_day_distribution: 낮, 밤 등 시간대별로 학습 데이터가 어떻게 분포되어 있는지 분석합니다.
+        - scenario_distribution: 기상과 시간대의 조합별로 학습 데이터가 어떻게 분포되어 있는지 분석합니다. 예를 들어, '맑은 날의 낮'과 '비 오는 날의 밤'이 각각 전체 데이터에서 몇 퍼센트를 차지하는지 분석하여 모델이 다양한 시나리오에서 학습될 수 있도록 합니다.
+    * **Label Density Analysis (avg_labels_per_video):** 영상당 평균 객체 수를 산출하여 데이터의 복잡도(Complexity)를 파악합니다.
     """
     if os.path.exists(DB_PATH):
         return {"message": "데이터베이스가 이미 존재합니다."}
