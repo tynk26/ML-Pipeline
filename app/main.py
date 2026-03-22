@@ -40,28 +40,28 @@ router = APIRouter()
 @app.post("/analyze")
 async def analyze():
     """
-    ### 데이터 분석 및 DB 적재 
+    ## `POST /analyze` 데이터 분석 및 DB 적재: 이 엔드포인트는 원본 데이터셋을 전수 조사하여 학습 가용 데이터를 추출하고 품질 미달 및 오류 데이터를 격리합니다.
+
+    ## 1. RESPONSE
+
+    **1-1. Status:** 데이터 처리의 성공 여부를 나타내는 필드입니다. "success" 또는 "error"로 반환됩니다.
     
-    ### 이 엔드포인트는 원본 데이터셋을 전수 조사하여 학습 가용 데이터를 추출하고 품질 미달 및 오류 데이터를 격리합니다.
-    
-    **1. Status:** 데이터 처리의 성공 여부를 나타내는 필드입니다. "success" 또는 "error"로 반환됩니다.
-    
-    **2. 데이터 통합 및 정제 요약 (Processing Summary):** 전체 입력 데이터 중 결함을 걸러내고 최종 학습에 투입 가능한 유효 데이터의 총량과 정제 효율을 정량적으로 증명하는 지표입니다.
+    **1-2. 데이터 통합 및 정제 요약 (Processing Summary):** 전체 입력 데이터 중 결함을 걸러내고 최종 학습에 투입 가능한 유효 데이터의 총량과 정제 효율을 정량적으로 증명하는 지표입니다.
     * **Total Input Videos:** 원본 데이터셋에 존재하는 총 영상 수입니다.
     * **Integrated Videos:** ODD와 LABELING데이터가 모두 존재하고, 데이터 무결성 검사를 통과한 최종 학습용 영상 수입니다.
     * **Integration Rate:** 전체 입력 대비 최종 통합된 영상의 비율로, 데이터 품질과 정제 효율을 나타냅니다.
     * **Total Rejections:** ODD 매칭 실패, LABELING 누락, 객체 수 오류 등으로 거절된 영상의 총 수입니다.
 
-    **3. 단계별 격리 처리 (Rejection by Stage):** 각 처리 단계(ODD 매칭, 라벨링 검증)별로 거절된 영상 수를 집계하여 어느 단계에서 문제가 발생하는지 파악합니다.
+    **1-3. 단계별 거절(Rejection by Stage):** 각 처리 단계(ODD 매칭, 라벨링 검증)별로 거절된 영상 수를 집계하여 어느 단계에서 문제가 발생하는지 파악합니다.
     * 모든 거절 데이터는 발생 지점에 따라 `odd_tagging_step` 또는 `auto_labeling_step`으로 분류되어 기록됩니다.
 
-    **4. 캡처하는 예외 케이스 (Rejection By Reason):** 거절 사유별로 집계하여 어떤 유형의 오류가 가장 빈번한지 분석합니다.
+    **1-4. 사유별 거절(Rejection By Reason):** 거절 사유별로 집계하여 어떤 유형의 오류가 가장 빈번한지 분석합니다.
     * **Stage 1 (ODD DATA):** ODD 데이터 누락(`missing_odd_metadata`).
     * **Stage 1 (ODD INTEGRITY):** ODD ID 중복(`duplicate_odd_metadata`).
     * **Stage 2 (LABELING DATA):** LABEL 파일 누락(`missing_label_data`).
     * **Stage 2 (LABELING INTEGRITY):** LABEL 객체 수 0(`zero_obj_count`), 음수(`negative_obj_count`), 실수(`non_integer_obj_count`), 클래스 중복(`duplicate_label_class`).
     
-    **5. 통계 분석 (Statistical Report):** 최종 통합된 데이터셋에 대한 통계 분석을 통해 학습 데이터의 특성과 편향성을 파악합니다.
+    **1-5. 통계 분석 (Statistical Report):** 최종 통합된 데이터셋에 대한 통계 분석을 통해 학습 데이터의 특성과 편향성을 파악합니다.
     * **Object Class Frequency:** 각 객체 클래스(예: 자동차, 보행자 등)가 전체 영상에서 얼마나 자주 등장하는지 분석하여 클래스 불균형 문제를 탐지합니다.
     * **Label Class Distribution:** 각 객체 클래스가 전체 영상 중 몇 퍼센트의 영상에 출현하는지 분석합니다. 특정 배경에만 객체가 편중되어 학습되는 '배경 편향성'을 탐지하는 데 사용됩니다.
     * **Scene Complexity Distribution:** 영상 내 총 객체 수를 기준으로 저/중/고밀도 상황을 분류합니다. 모델이 혼잡한 환경에서 성능이 얼마나 유지되는지 테스트하기 위한 벤치마크 데이터셋 구성의 근거가 됩니다.
@@ -198,111 +198,8 @@ async def analyze():
     except Exception as e:
         if os.path.exists(DB_PATH): os.remove(DB_PATH)
         raise HTTPException(status_code=500, detail=f"Pipeline Failure: {str(e)}")
-    
+
 @app.get("/rejections")
-def get_rejections(
-    stage: Optional[str] = Query(
-        None, 
-        description="데이터 처리 단계 (Step 1: ODD 또는 Step 2: Labeling)",
-        openapi_examples={
-            "Step 1: ODD Tagging": {
-                "summary": "1단계: ODD 매칭 단계",
-                "value": "odd_tagging_step"
-            },
-            "Step 2: Auto Labeling": {
-                "summary": "2단계: 라벨 데이터 검증 단계",
-                "value": "auto_labeling_step"
-            }
-        }
-    ),
-    reason: Optional[str] = Query(
-        None, 
-        description="해당 단계에 발생하는 구체적인 사유",
-        openapi_examples={
-            "ODD: Missing Metadata": {
-                "summary": "[ODD 전용] ODD 데이터 없음",
-                "value": "missing_odd_metadata"
-            },
-            "ODD: Duplicate ID": {
-                "summary": "[ODD 전용] 중복된 ODD 비디오 ID",
-                "value": "duplicate_odd_metadata"
-            },
-            "Label: Missing Labels": {
-                "summary": "[Labeling 전용] LABELING 데이터 없음",
-                "value": "missing_label_data"
-            },
-            "Label: Car Duplicates": {
-                "summary": "[Labeling 전용] LABELING object 중복",
-                "value": "duplicate_label"
-            },
-            "Label: Pedestrian Negatives": {
-                "summary": "[Labeling 전용] LABELING object 음수 오류",
-                "value": "negative_obj_count"
-            }
-        }
-    ), 
-    page: int = Query(1, ge=1), 
-    size: int = Query(50, ge=1, le=100)
-):
-    """
-    ### 🛡️ 거절 데이터 필터링 가이드
-    Swagger UI의 각 파라미터 드롭다운에서 **단계(Stage)**와 **사유(Reason)** 조합을 선택하여 테스트할 수 있습니다.
-    
-    * **Step 1 (ODD)** 선택 시 -> `missing_odd_metadata` 등을 조합하세요.
-    * **Step 2 (Labeling)** 선택 시 -> `duplicate_label`이나 `negative_obj_count` 등을 조합하세요.
-    """
-    if not os.path.exists(DB_PATH):
-        return {"total": 0, "items": [], "summary_by_categories": {}}
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-
-    # 1. 동적 요약 (Summary) 생성 - 현재 DB에 실시간으로 존재하는 카테고리 노출
-    summary_query = "SELECT stage, reason, COUNT(*) as count FROM rejections GROUP BY stage, reason"
-    cursor.execute(summary_query)
-    summary_rows = cursor.fetchall()
-    summary = {}
-    for row in summary_rows:
-        s, r, c = row["stage"], row["reason"], row["count"]
-        if s not in summary: summary[s] = {}
-        summary[s][r] = c
-
-    # 2. 필터링 로직
-    base_query = "FROM rejections WHERE 1=1"
-    query_params = []
-    
-    if stage:
-        base_query += " AND stage = ?"
-        query_params.append(stage)
-    if reason:
-        # LIKE를 사용하여 'car'만 입력해도 'duplicate_label: car'를 찾도록 유연성 유지
-        base_query += " AND reason LIKE ?"
-        query_params.append(f"%{reason}%")
-
-    # 페이징 및 결과 반환
-    cursor.execute(f"SELECT COUNT(*) {base_query}", query_params)
-    total_count = cursor.fetchone()[0]
-
-    query = f"SELECT * {base_query} LIMIT ? OFFSET ?"
-    cursor.execute(query, query_params + [size, (page - 1) * size])
-    rows = [dict(row) for row in cursor.fetchall()]
-    
-    for r in rows:
-        if r.get("raw_data"):
-            try: r["raw_data"] = json.loads(r["raw_data"])
-            except: pass
-
-    conn.close()
-    
-    return {
-        "status": "success",
-        "total": total_count,
-        "summary_by_categories": summary,
-        "items": rows
-    }
-
-@app.get("/rejections", tags=["Pipeline"])
 def get_rejections(
     stage: Optional[str] = Query(
         None, 
@@ -330,6 +227,32 @@ def get_rejections(
     page: int = Query(1, ge=1), 
     size: int = Query(50, ge=1, le=100)
 ):
+    """
+    ## `GET /rejections` 정제 과정에서 거부된 데이터 목록을 조회합니다. 거부 사유**와** 문제가 발생한 단계로 필터링할 수 있으며, 페이지네이션을 통해 대규모 거부 데이터셋을 효율적으로 탐색할 수 있습니다.
+    ## 1. Feature: Multidimensional Filtering
+    - 특정 검증 단계(stage)나 세부 결함 사유(Reason)를 조합하여 조회가 가능합니다.
+    - 페이지네이션을 통해 대규모 거부 데이터셋을 효율적으로 탐색할 수 있습니다.
+    - 전체 거절 항목 조회시, 전체 단계, 전체 사유를 선택해야합니다
+
+    ## 2. Arguments
+    - stage (str, optional): 'odd_tagging_step' 또는 'auto_labeling_step'으로 필터링.
+    - reason (str, optional): 'missing_odd_metadata', 'zero_obj_count' 등 구체적 사유로 필터링.
+    - page (int): 조회할 페이지 번호 (기본값: 1).
+    - size (int): 페이지당 레코드 수 (기본값: 50).
+
+    ## 3. Response
+    - status (str): 요청 처리 성공 여부 (success/error).
+    - overall_stats (dict): 필터링 조건과 관계없는 전체 격리 데이터의 거시적 통계.
+        * total_rejections: 파이프라인에서 제외된 총 영상 수.
+        * by_stage: 각 단계(Stage 1 & 2)에서 발생한 탈락 수.
+        * by_reason: 세부 결함 사유별 발생 빈도(Distribution).
+    - metadata (dict): 현재 필터링된 결과에 대한 페이지네이션 정보 (filtered_total, total_pages 등).
+    - items (list): 거절된 데이터의 상세 객체 리스트.
+        * video_id: 영상 식별자.
+        * stage: 거절 단계 
+        * reason: 거절 상세 사유.
+        * raw_data: 문제 발생 당시의 원본 selections JSON/CSV 레코드 보존 데이터.
+    """
     if not os.path.exists(DB_PATH):
         return {"status": "error", "message": "DB 파일이 없습니다."}
 
@@ -342,7 +265,7 @@ def get_rejections(
     all_rejections = cursor.fetchall()
     
     overall_stats = {
-        "total_quarantined": len(all_rejections),
+        "total_rejections": len(all_rejections),
         "by_stage": {"odd_tagging_step": 0, "auto_labeling_step": 0},
         "by_reason": {
             "missing_odd_metadata": 0, "duplicate_odd_metadata": 0,
@@ -399,7 +322,7 @@ def get_rejections(
     return {
         "status": "success",
         "overall_stats": overall_stats,
-        "metadata": {
+        "filtered_rejections": {
             "filtered_total": filtered_total,
             "page": page,
             "size": size,
