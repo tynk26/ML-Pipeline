@@ -166,24 +166,32 @@ def prepare_database():
 
 # --- Search Functionality Scenarios ---
 @pytest.mark.parametrize("scenario, payload, expect_to_find_vid_3", [
-    # A. Perfect Match (Video 3 attributes)
-    ("EXACT_MATCH", {"weather": "sunny", "time_of_day": "night", "wiper_on": 1}, True),
+    # --- A. The "Sandwich" Stress Tests ---
+    ("TEMP_EXACT_BOUNDARY", {"temperature_celsius_min": 14.55, "temperature_celsius_max": 14.56}, True),
+    ("MULTI_OBJECT_SANDWICH", {
+        "label_car_min": 20, 
+        "label_pedestrian_min": 20, 
+        "label_traffic_sign_min": 5
+    }, True),
+    ("CONFIDENCE_BOUNDARY_HIGH", {"label_car_confidence_min": 0.83, "label_car_confidence_max": 0.84}, True),
+    ("CONFIDENCE_BOUNDARY_LOW", {"label_car_confidence_min": 0.90}, False),
+
+    # --- B. Environmental & Hardware State ---
+    ("HARDWARE_MATCH", {"wiper_on": 1, "headlights_on": 1, "wiper_level": 3}, True),
+    ("ROAD_SURFACE_STRICT", {"road_surface": "dry", "weather": "sunny"}, True),
+    ("ROAD_SURFACE_MISS", {"road_surface": "wet"}, False),
+
+    # --- C. Time String "LIKE" Logic ---
+    ("TIME_SUBSTR_HOUR", {"recorded_at_min": "2026-01-10T19:44"}, True),
+    ("TIME_SUBSTR_SECOND_MISS", {"recorded_at_min": "2026-01-10T19:44:99"}, False),
+
+    # --- D. Null & Empty Handling ---
+    ("NON_EXISTENT_CLASS_FILTER", {"label_motorcycle_min": 1}, False),
+    ("EMPTY_PAYLOAD", {}, True), # Should return everything, including Vid 3
     
-    # B. Temperature Sandwich (Video 3 is 14.55)
-    ("TEMP_IN_RANGE", {"temperature_celsius_min": 14, "temperature_celsius_max": 15}, True),
-    ("TEMP_OUT_RANGE", {"temperature_celsius_min": 25, "temperature_celsius_max": 30}, False),
-    
-    # C. Confidence & Count Sandwich (Video 3: Car count 31, Conf 0.83)
-    ("HIGH_TRAFFIC_CONFIDENT", {"label_car_min": 30, "label_car_confidence_min": 0.8}, True),
-    ("HIGH_TRAFFIC_LOW_CONF", {"label_car_min": 30, "label_car_confidence_max": 0.5}, False),
-    
-    # D. Time-Series Substring (Video 3: 2026-01-10T19)
-    ("DATE_SUBSTR_MATCH", {"recorded_at_min": "2026-01-10"}, True),
-    ("DATE_YEAR_MISS", {"recorded_at_min": "2024", "recorded_at_max": "2025"}, False),
-    
-    # E. Multi-Object Filter
-    ("CAR_AND_PEDESTRIAN", {"label_car_min": 10, "label_pedestrian_min": 10}, True),
-    ("CAR_AND_NONEXISTENT_BUS", {"label_car_min": 10, "label_bus_min": 1}, False),
+    # --- E. ID Range (Video 3) ---
+    ("ID_SANDWICH_HIT", {"video_id_min": 1, "video_id_max": 10}, True),
+    ("ID_SANDWICH_MISS", {"video_id_min": 4, "video_id_max": 100}, False),
 ])
 def test_search_scenarios(scenario, payload, expect_to_find_vid_3):
     """Checks various filter combinations against the known sample data."""
@@ -199,14 +207,18 @@ def test_search_scenarios(scenario, payload, expect_to_find_vid_3):
         assert 3 not in found_ids, f"Scenario '{scenario}' failed: Video 3 should NOT have been found."
 # --- Rejection Endpoint Scenarios (Dynamic ID Version) ---
 @pytest.mark.parametrize("scenario, params", [
-    # 1. Filter by specific stage
-    ("FILTER_BY_STAGE", {"stage": "auto_labeling_step"}),
+    # 1. Stage Isolation
+    ("STAGE_ODD", {"stage": "odd_tagging_step"}),
+    ("STAGE_LABEL", {"stage": "auto_labeling_step"}),
     
-    # 2. Filter by partial reason (LIKE 'non_integer')
-    ("FILTER_BY_REASON_LIKE", {"reason": "non_integer"}),
+    # 2. Specific Error Reason Substrings
+    ("REASON_MISSING_ODD", {"reason": "missing_odd"}),
+    ("REASON_DUPLICATE", {"reason": "duplicate"}),
+    ("REASON_NEGATIVE", {"reason": "negative"}),
+    ("REASON_NON_INT", {"reason": "non_integer"}),
     
-    # 3. Filter by partial reason (LIKE 'obj_count')
-    ("FILTER_BY_REASON_ALT", {"reason": "obj_count"}),
+    # 3. Combined Filters (If your API supports both at once)
+    ("STAGE_AND_REASON", {"stage": "auto_labeling_step", "reason": "non_integer"}),
 ])
 def test_rejection_scenarios(scenario, params):
     """
