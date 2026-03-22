@@ -411,7 +411,7 @@ async def search_data(
         - **객체 수**: `label_{class}_min` 형식 (예: `"label_car_min": 5`) -> `label_car_count` 컬럼 매핑
         - **신뢰도**: `label_{class}_confidence_min` 형식 (예: `"label_pedestrian_confidence_min": 0.8`)
 
-    ### 2. 🕒 시간 데이터 검색 특화 (Time-Series Matching)
+    ### 2. 시간 데이터 검색 특화 (Time-Series Matching)
     `recorded_at` 및 `labeled_at` 필드는 SQLite의 `substr` 함수를 이용한 **유연한 부분 일치**를 지원합니다.
     - **동작 방식**: 사용자가 입력한 문자열 길이만큼 DB 값을 잘라서 비교합니다.
     - **예시**: 
@@ -514,15 +514,15 @@ async def search_data(
     conn.close()
     return {"status": "success", "pagination": {"page": page, "size": size, "total_found": total_found}, "results": rows}
 
-@app.get("/joined_data", tags=["View"])
-def get_joined_data():
-    """### 📂 통합 데이터 미리보기 (Top 50)"""
-    if not os.path.exists(DB_PATH): raise HTTPException(status_code=503, detail="DB 초기화 필요")
-    conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM integrated_data LIMIT 50")
-    rows = [dict(row) for row in cursor.fetchall()]
-    for r in rows:
-        if r.get("labels"): r["labels"] = json.loads(r["labels"])
-    conn.close()
-    return {"count": len(rows), "data": rows}
+# @app.get("/joined_data", tags=["View"])
+# def get_joined_data():
+#     """### 📂 통합 데이터 미리보기 (Top 50)"""
+#     if not os.path.exists(DB_PATH): raise HTTPException(status_code=503, detail="DB 초기화 필요")
+#     conn = sqlite3.connect(DB_PATH); conn.row_factory = sqlite3.Row
+#     cursor = conn.cursor()
+#     cursor.execute("SELECT * FROM integrated_data LIMIT 50")
+#     rows = [dict(row) for row in cursor.fetchall()]
+#     for r in rows:
+#         if r.get("labels"): r["labels"] = json.loads(r["labels"])
+#     conn.close()
+#     return {"count": len(rows), "data": rows}

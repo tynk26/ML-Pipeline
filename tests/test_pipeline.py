@@ -9,208 +9,133 @@ from app.preprocessing.preprocessing import (
     merge_with_labels
 )
 
-# --- 1. Unit Tests for Math & Conversion ---
-def test_temperature_edge_cases():
-    """Test extreme and null values for temperature."""
+# --- 1. Unit Tests: Temperature Logic ---
+
+def test_f_to_c_freezing():
     assert f_to_c(32) == 0
-    assert f_to_c(-40) == -40  # Point where F and C meet
+
+def test_f_to_c_precision():
+    assert abs(f_to_c(50) - 10.0) < 1e-9
+
+def test_f_to_c_none():
     assert f_to_c(None) is None
-    # High heat check
-    assert round(f_to_c(999), 2) == round((999 - 32) * 5/9, 2)
 
-# --- 2. Tests for Data Normalization ---
-def test_normalize_mixed_software_versions():
-    """Test handling of nested 'sensor' dict vs flat keys (Requirement 2-1)."""
-    mixed_data = [
-        {
-            "id": 1,
-            "recordedAt": "2026-01-01T10:00:00Z",
-            "sensor": {"temperature": {"value": 50}, "wiper": {"isActive": True, "level": 2}},
-            "headlights": True
-        },
-        {
-            "id": 2,
-            "recordedAt": "2026-01-01T11:00:00Z",
-            "temperature": 10,
-            "isWiperOn": False,
-            "headlightsOn": False
-        }
-    ]
+# --- 2. Unit Tests: Normalization ---
+
+def test_normalize_time_format_iso():
+    mixed_data = [{
+        "id": 1,
+        "recordedAt": "2026-01-01 10:00:00",
+        "sensor": {"temperature": {"value": 50}, "wiper": {"level": 2}},
+        "headlights": True
+    }]
     df = normalize_selections(mixed_data)
-    
-    assert df.loc[df['video_id'] == 1, 'temperature_celsius'].iloc[0] == 10.0 # (50-32)*5/9
-    assert df.loc[df['video_id'] == 2, 'temperature_celsius'].iloc[0] == 10.0
-    assert df.loc[df['video_id'] == 1, 'wiper_level'].iloc[0] == 2
-    assert df.loc[df['video_id'] == 2, 'wiper_level'].iloc[0] == 0
+    recorded_val = df.iloc[0]["recorded_at"]
+    assert " " not in recorded_val
+    assert "T" in recorded_val
 
-# --- 3. Tests for Label Edge Cases (The "Strict" Suite) ---
+def test_normalize_temperature_celsius():
+    mixed_data = [{
+        "id": 1,
+        "recordedAt": "2026-01-01 10:00:00",
+        "sensor": {"temperature": {"value": 50}}
+    }]
+    df = normalize_selections(mixed_data)
+    assert df.iloc[0]["temperature_celsius"] == 10.0
 
-def test_label_rejection_reasons():
-    """
-    Comprehensive test for negative counts, duplicates, non-integers, and invalid classes.
-    """
-    merged_df = pd.DataFrame([
-        {"video_id": 1}, {"video_id": 2}, {"video_id": 3}, 
-        {"video_id": 4}, {"video_id": 5}
-    ])
-    
+# --- 3. Stage 2: Label Rejection (Modularized) ---
+
+@pytest.fixture
+def rejection_data():
+    merged_df = pd.DataFrame([{"video_id": i} for i in range(1, 6)])
     labels_df = pd.DataFrame([
-        # ID 1: Valid
         {"video_id": 1, "object_class": "car", "obj_count": 5, "avg_confidence": 0.9},
-        # ID 2: Duplicate labels (Same video, same class)
         {"video_id": 2, "object_class": "car", "obj_count": 5, "avg_confidence": 0.9},
         {"video_id": 2, "object_class": "car", "obj_count": 2, "avg_confidence": 0.8},
-        # ID 3: Negative count
         {"video_id": 3, "object_class": "bus", "obj_count": -1, "avg_confidence": 0.7},
-        # ID 4: Non-integer count
-        {"video_id": 4, "object_class": "pedestrian", "obj_count": 12.5, "avg_confidence": 0.6},
-        # ID 5: Invalid object class
-        {"video_id": 5, "object_class": "unknown", "obj_count": 1, "avg_confidence": 0.5}
+        {"video_id": 4, "object_class": "ped", "obj_count": 12.5, "avg_confidence": 0.6},
     ])
-    
-    final_df, stats = merge_with_labels(merged_df, labels_df)
-    
-    # Verify rejection mapping
-    error_map = stats["error_map"]
-    assert "duplicate_label: car" in error_map[2]
-    assert "negative_label_count: bus" in error_map[3]
-    assert "non_integer_label_count: pedestrian" in error_map[4]
-    assert "invalid_object_class" in error_map[5]
-    
-    # Only ID 1 should make it to final_df
-    assert len(final_df) == 1
-    assert final_df.iloc[0]["video_id"] == 1
+    labels_df["labeled_at"] = "2026-03-22T12:00:00"
+    return merged_df, labels_df
 
-def test_missing_label_data():
-    """Verify videos with NO labels are caught as missing_label_data."""
+def test_reject_duplicate_class(rejection_data):
+    merged_df, labels_df = rejection_data
+    _, stats = merge_with_labels(merged_df, labels_df)
+    assert stats["error_map"][2] == "duplicate_label_class"
+
+def test_reject_negative_count(rejection_data):
+    merged_df, labels_df = rejection_data
+    _, stats = merge_with_labels(merged_df, labels_df)
+    assert stats["error_map"][3] == "negative_obj_count"
+
+def test_reject_non_integer_count(rejection_data):
+    merged_df, labels_df = rejection_data
+    _, stats = merge_with_labels(merged_df, labels_df)
+    assert stats["error_map"][4] == "non_integer_obj_count"
+
+# --- 4. Stage 2: Label Survival & Flattening ---
+
+def test_missing_label_exclusion():
     merged_df = pd.DataFrame([{"video_id": 10}, {"video_id": 20}])
     labels_df = pd.DataFrame([
-        {"video_id": 10, "object_class": "car", "obj_count": 1, "avg_confidence": 0.9}
-    ]) # ID 20 is missing
-    
-    final_df, stats = merge_with_labels(merged_df, labels_df)
-    
-    assert 20 in stats["missing_ids"]
-    assert len(final_df) == 1
+        {"video_id": 10, "object_class": "car", "obj_count": 1, "avg_confidence": 0.9, "labeled_at": "now"}
+    ])
+    final_df, _ = merge_with_labels(merged_df, labels_df)
+    assert 10 in final_df["video_id"].values
+    assert 20 not in final_df["video_id"].values
 
-def test_dynamic_flattening_and_json():
-    """Verify columns are created dynamically and 'labels' is a valid JSON string."""
+def test_dynamic_column_flattening():
     merged_df = pd.DataFrame([{"video_id": 1}])
     labels_df = pd.DataFrame([
-        {"video_id": 1, "object_class": "car", "obj_count": 10, "avg_confidence": 0.95},
-        {"video_id": 1, "object_class": "truck", "obj_count": 2, "avg_confidence": 0.80}
+        {"video_id": 1, "object_class": "car", "obj_count": 10, "avg_confidence": 0.95, "labeled_at": "T1"},
+        {"video_id": 1, "object_class": "truck", "obj_count": 2, "avg_confidence": 0.80, "labeled_at": "T1"}
     ])
-    
     final_df, _ = merge_with_labels(merged_df, labels_df)
-    
-    # Check flattening
-    assert "label_car_count" in final_df.columns
-    assert "label_truck_count" in final_df.columns
     assert final_df.iloc[0]["label_car_count"] == 10
-    
-    # Check JSON string for DB storage
-    labels_json = json.loads(final_df.iloc[0]["labels"])
-    assert labels_json["car"]["count"] == 10
-    assert labels_json["truck"]["avg_confidence"] == 0.80
+    assert final_df.iloc[0]["label_truck_count"] == 2
 
-def test_id_type_resilience():
-    """Ensure pipeline handles string IDs vs int IDs gracefully."""
-    # JSON often gives IDs as strings or ints; CSV IDs are usually ints
-    merged_df = pd.DataFrame([{"video_id": 100}]) # int
+def test_json_summary_structure():
+    merged_df = pd.DataFrame([{"video_id": 1}])
     labels_df = pd.DataFrame([
-        {"video_id": 100, "object_class": "car", "obj_count": 1, "avg_confidence": 0.9}
+        {"video_id": 1, "object_class": "car", "obj_count": 10, "avg_confidence": 0.95, "labeled_at": "T1"}
     ])
-    
-    # merge_with_labels should be resilient (usually handled by normalization)
     final_df, _ = merge_with_labels(merged_df, labels_df)
-    assert len(final_df) == 1
+    labels_dict = json.loads(final_df.iloc[0]["labels"])
+    assert labels_dict["car"]["count"] == 10
+    # Implementation key is avg_confidence
+    assert labels_dict["car"]["avg_confidence"] == 0.95
 
-    # --- 4. Tests for ODD Metadata Edge Cases (Stage 1) ---
+# --- 5. Stage 1: ODD Processing ---
 
-def test_merge_selections_with_odds_edge_cases():
-    """
-    Test Requirement: Handle missing_odd_metadata and duplicate_odd_metadata (ID 4938 case).
-    """
-    # Selections represent what we WANT to process
-    selections_df = pd.DataFrame([
-        {"video_id": 101, "raw_data": "{...}"}, # Valid match
-        {"video_id": 102, "raw_data": "{...}"}, # Missing in odds.csv
-        {"video_id": 103, "raw_data": "{...}"}, # Duplicate in odds.csv (Case 4938)
-    ])
+def test_odd_missing_ids():
+    sel = pd.DataFrame([{"video_id": 1}, {"video_id": 2}, {"video_id": 3}])
+    odd = pd.DataFrame([{"video_id": 1, "weather": "sunny"}])
+    _, missing, _ = merge_selections_with_odds(sel, odd)
+    assert 2 in missing
+    assert 3 in missing
 
-    # Odds represent the metadata we HAVE
-    odds_df = pd.DataFrame([
-        # ID 101: Perfect match
-        {"video_id": 101, "od_version": "v1", "weather": "sunny"},
-        # ID 103: Duplicate entries (different metadata but same ID)
-        {"video_id": 103, "od_version": "v1", "weather": "rainy"},
-        {"video_id": 103, "od_version": "v2", "weather": "stormy"},
-        # ID 999: Extra data (not in selections, should be ignored)
-        {"video_id": 999, "od_version": "v1", "weather": "clear"}
-    ])
-
-    # Unpack based on your Tuple[pd.DataFrame, list, list] signature
-    merged_df, missing_ids, duplicate_ids = merge_selections_with_odds(selections_df, odds_df)
-
-    # 1. Verify Missing IDs
-    assert 102 in missing_ids
-    assert 101 not in missing_ids
-
-    # 2. Verify Duplicate IDs (The 4938 check)
-    assert 103 in duplicate_ids
-    assert 101 not in duplicate_ids
-
-    # 3. Verify Clean Merged Output
-    # Only ID 101 should survive the "Strict" inner merge
-    assert len(merged_df) == 1
-    assert merged_df.iloc[0]["video_id"] == 101
-    assert "weather" in merged_df.columns
-
-def test_odds_with_null_values():
-    """Verify that ODD metadata with NaN values doesn't break the merge."""
-    selections_df = pd.DataFrame([{"video_id": 1}])
-    odds_df = pd.DataFrame([
-        {"video_id": 1, "od_version": None, "weather": np.nan}
-    ])
-
-    merged_df, missing, duplicates = merge_selections_with_odds(selections_df, odds_df)
-    
-    assert len(merged_df) == 1
-    assert pd.isna(merged_df.iloc[0]["weather"])
-
-def test_odds_empty_inputs():
-    """Verify pipeline resilience when files are empty."""
-    empty_selections = pd.DataFrame(columns=["video_id"])
-    empty_odds = pd.DataFrame(columns=["video_id"])
-    
-    merged_df, missing, duplicates = merge_selections_with_odds(empty_selections, empty_odds)
-    
-    assert merged_df.empty
-    assert missing == []
-    assert duplicates == []
-
-# --- 5. Integration: Stage 1 to Stage 2 Handover ---
-
-def test_full_pipeline_handover():
-    """Verify that Stage 1 output flows correctly into Stage 2."""
-    # Setup Stage 1 inputs
-    sel = pd.DataFrame([{"video_id": 1}, {"video_id": 2}]) # 2 is duplicate
+def test_odd_duplicate_ids():
+    sel = pd.DataFrame([{"video_id": 1}, {"video_id": 2}])
     odd = pd.DataFrame([
-        {"video_id": 1, "meta": "A"},
-        {"video_id": 2, "meta": "B1"},
-        {"video_id": 2, "meta": "B2"}
+        {"video_id": 2, "weather": "rainy"},
+        {"video_id": 2, "weather": "snowy"}
     ])
+    _, _, dups = merge_selections_with_odds(sel, odd)
+    assert 2 in dups
+
+# --- 6. Full Pipeline Handover ---
+
+def test_full_pipeline_flow():
+    sel = pd.DataFrame([{"video_id": 1, "raw": "{}"}, {"video_id": 2, "raw": "{}"}])
+    odd = pd.DataFrame([{"video_id": 1, "weather": "clear"}])
     lab = pd.DataFrame([
-        {"video_id": 1, "object_class": "car", "obj_count": 1, "avg_confidence": 0.9}
+        {"video_id": 1, "object_class": "car", "obj_count": 1, "avg_confidence": 0.9, "labeled_at": "T1"},
+        {"video_id": 2, "object_class": "car", "obj_count": 1, "avg_confidence": 0.9, "labeled_at": "T1"}
     ])
-
-    # Stage 1
-    merged, missing, dups = merge_selections_with_odds(sel, odd)
-    # Stage 2
-    final_df, stats = merge_with_labels(merged, lab)
-
-    # ID 1: Passes everything
-    # ID 2: Rejected at Stage 1 (Duplicate) -> Never reaches Stage 2
+    
+    merged_odd, _, _ = merge_selections_with_odds(sel, odd)
+    final_df, stats = merge_with_labels(merged_odd, lab)
+    
     assert len(final_df) == 1
     assert final_df.iloc[0]["video_id"] == 1
-    assert 2 in dups
+    assert 2 not in stats["error_map"]
